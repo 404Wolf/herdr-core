@@ -13,6 +13,7 @@ mod ffi {
     pub type KeyEvent = *mut c_void;
     pub type MouseEncoder = *mut c_void;
     pub type MouseEvent = *mut c_void;
+    pub type RenderState = *mut c_void;
 
     #[repr(C)]
     pub struct MouseSize {
@@ -48,6 +49,13 @@ mod ffi {
     pub const OPT_SCROLLBACK_MAX_BYTES: i32 = 27;
     pub const OPT_CONTINUATION_MAX_BYTES: i32 = 31;
     pub const OPT_MODE_DEFAULT: i32 = 33;
+    pub const OPT_DEFAULT_CURSOR_STYLE: i32 = 22;
+    pub const CURSOR_BAR: i32 = 0;
+    pub const CURSOR_BLOCK: i32 = 1;
+    pub const CURSOR_UNDERLINE: i32 = 2;
+    pub const CURSOR_BLOCK_HOLLOW: i32 = 3;
+    pub const RENDER_CURSOR_VISUAL_STYLE: i32 = 10;
+    pub const RENDER_CURSOR_BLINKING: i32 = 12;
     pub const DATA_COLS: i32 = 1;
     pub const DATA_ROWS: i32 = 2;
     pub const DATA_ACTIVE_SCREEN: i32 = 6;
@@ -190,6 +198,10 @@ mod ffi {
         pub fn ghostty_terminal_set(t: Terminal, opt: i32, value: *const c_void) -> i32;
         pub fn ghostty_terminal_get(t: Terminal, data: i32, out: *mut c_void) -> i32;
         pub fn ghostty_terminal_vt_write(t: Terminal, data: *const u8, len: usize);
+        pub fn ghostty_render_state_new(alloc: *const c_void, out: *mut RenderState) -> i32;
+        pub fn ghostty_render_state_free(state: RenderState);
+        pub fn ghostty_render_state_update(state: RenderState, t: Terminal) -> i32;
+        pub fn ghostty_render_state_get(state: RenderState, data: i32, out: *mut c_void) -> i32;
         pub fn ghostty_terminal_vt_write_until_ground(
             t: Terminal,
             data: *const u8,
@@ -413,6 +425,11 @@ impl Terminal {
             // On from the start, as in Ghostty and the app: VS16 makes ✍️ two cells wide.
             let cluster = ffi::ModeConfig { mode: 2027, value: true };
             set(ffi::OPT_MODE_DEFAULT, (&raw const cluster).cast());
+            // Never drawn here: a hollow default marks "the program chose no
+            // shape" (CSI 0 q, a reset, or nothing yet), so a repaint can leave
+            // the viewer's own default alone. DECRQSS reports it as a block.
+            let hollow = ffi::CURSOR_BLOCK_HOLLOW;
+            set(ffi::OPT_DEFAULT_CURSOR_STYLE, (&raw const hollow).cast());
             set(ffi::OPT_USERDATA, ud.cast());
             set(ffi::OPT_WRITE_PTY, on_write_pty as *const c_void);
             set(ffi::OPT_XTVERSION, on_xtversion as *const c_void);
@@ -621,6 +638,32 @@ impl Terminal {
         cfg.value
     }
 
+    /// The shape the program asked for with DECSCUSR (`CSI Ps SP q`), as the
+    /// sequence that sets it again; `None` when it follows the default.
+    pub fn cursor_shape(&self) -> Option<&'static [u8]> {
+        let mut state = ptr::null_mut();
+        if unsafe { ffi::ghostty_render_state_new(ptr::null(), &mut state) } != ffi::SUCCESS {
+            return None;
+        }
+        let (mut style, mut blinking) = (ffi::CURSOR_BLOCK_HOLLOW, false);
+        unsafe {
+            if ffi::ghostty_render_state_update(state, self.raw) == ffi::SUCCESS {
+                ffi::ghostty_render_state_get(state, ffi::RENDER_CURSOR_VISUAL_STYLE, (&raw mut style).cast());
+                ffi::ghostty_render_state_get(state, ffi::RENDER_CURSOR_BLINKING, (&raw mut blinking).cast());
+            }
+            ffi::ghostty_render_state_free(state);
+        }
+        Some(match (style, blinking) {
+            (ffi::CURSOR_BLOCK, true) => b"\x1b[1 q",
+            (ffi::CURSOR_BLOCK, false) => b"\x1b[2 q",
+            (ffi::CURSOR_UNDERLINE, true) => b"\x1b[3 q",
+            (ffi::CURSOR_UNDERLINE, false) => b"\x1b[4 q",
+            (ffi::CURSOR_BAR, true) => b"\x1b[5 q",
+            (ffi::CURSOR_BAR, false) => b"\x1b[6 q",
+            _ => return None,
+        })
+    }
+
     pub fn title(&self) -> String {
         let mut s = ffi::Str { ptr: ptr::null(), len: 0 };
         let rc = unsafe { ffi::ghostty_terminal_get(self.raw, ffi::DATA_TITLE, (&raw mut s).cast()) };
@@ -699,8 +742,8 @@ impl Terminal {
     }
 
     /// Bytes that repaint this terminal on a fresh viewer: up to `history`
-    /// scrollback lines (main screen only), then the screen with its modes,
-    /// cursor and title.
+    /// scrollback lines (main screen only), then the cursor shape, then the
+    /// screen with its modes, cursor and title.
     pub fn paint(&self, history: usize) -> Vec<u8> {
         let (cols, rows) = self.size();
         let last = (cols.saturating_sub(1), rows.saturating_sub(1) as u32);
@@ -723,6 +766,12 @@ impl Terminal {
         }
         if self.alt_screen() {
             out.extend(b"\x1b[?1049h");
+        }
+        // The soft reset above put the viewer's cursor back to its default; a
+        // shape the program chose (vi-mode's bar, say) goes back on. Before the
+        // screen, so a later DEC 12 blink change in its modes still wins.
+        if let Some(shape) = self.cursor_shape() {
+            out.extend(shape);
         }
         if let Some(sel) = self.select(ffi::POINT_ACTIVE, (0, 0), last) {
             let screen = self.format(ffi::FORMAT_VT, Some(&sel), true);

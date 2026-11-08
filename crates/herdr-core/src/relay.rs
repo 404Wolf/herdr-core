@@ -195,6 +195,20 @@ mod tests {
     }
 
     #[test]
+    fn cursor_shapes_reach_viewers() {
+        // DECSCUSR ends in `q` like a query, but nothing answers it: viewers draw it.
+        for split in [false, true] {
+            let mut screen = Screen::new(80, 24, 1 << 20);
+            let mut relay = Relay::default();
+            let input = b"\x1b[6 q$ \x1b[2 q\x1b[0 q";
+            let out =
+                if split { feed_bytewise(&mut relay, &mut screen, input) } else { relay.feed(&mut screen, input) };
+            assert_eq!(out, input, "split={split}");
+            assert!(screen.take_responses().is_empty());
+        }
+    }
+
+    #[test]
     fn resize_reports_are_dropped_but_query_answers_are_kept() {
         let mut screen = Screen::new(80, 24, 1 << 20);
         let mut relay = Relay::default();

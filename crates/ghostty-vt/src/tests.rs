@@ -222,3 +222,42 @@ fn grapheme_clustering_is_on_like_ghostty() {
     t.write(b"\x1bc");
     assert!(t.dec_mode(2027), "a reset keeps it on");
 }
+
+/// What the terminal answers to DECRQSS for the cursor shape.
+fn decscusr(t: &mut Terminal) -> String {
+    t.take_responses();
+    t.write(b"\x1bP$q q\x1b\\");
+    String::from_utf8_lossy(&t.take_responses()).into_owned()
+}
+
+#[test]
+fn paint_replays_the_cursor_shape_the_program_chose() {
+    // zsh-vi-mode in insert mode, nvim, Claude Code's vim mode: a bar.
+    for (set, answer) in [("6", "6"), ("5", "5"), ("2", "2"), ("4", "4")] {
+        let mut t = Terminal::new(80, 24, 0);
+        t.write(format!("\x1b[{set} q").as_bytes());
+        let mut viewer = Terminal::new(80, 24, 0);
+        viewer.write(b"\x1b[3 q"); // whatever the viewer showed before
+        viewer.write(&t.paint(0));
+        assert_eq!(decscusr(&mut viewer), format!("\x1bP1$r{answer} q\x1b\\"), "after CSI {set} q");
+
+        // A snapshot keeps it too.
+        let restored = Terminal::restore(&t.snapshot().unwrap(), 0).unwrap();
+        assert_eq!(restored.cursor_shape(), t.cursor_shape());
+    }
+}
+
+#[test]
+fn paint_leaves_the_viewers_default_cursor_when_the_program_chose_none() {
+    let fresh = Terminal::new(80, 24, 0);
+    let mut reset = Terminal::new(80, 24, 0);
+    reset.write(b"\x1b[6 q\x1b[0 q");
+    let mut soft = Terminal::new(80, 24, 0);
+    soft.write(b"\x1b[6 q\x1b[!p");
+    for t in [fresh, reset, soft] {
+        assert_eq!(t.cursor_shape(), None);
+        assert!(!String::from_utf8_lossy(&t.paint(0)).contains(" q"));
+    }
+    // The hollow marker never shows in what the core answers itself.
+    assert_eq!(decscusr(&mut Terminal::new(80, 24, 0)), "\x1bP1$r2 q\x1b\\");
+}
