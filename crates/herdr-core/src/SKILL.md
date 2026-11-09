@@ -136,6 +136,10 @@ both cores must have this support. `terminal.attach`'s `desktop_group` is
 core-to-core metadata: ordinary clients cannot claim a group. Forwarded
 groups are scoped to the source core line, including after reconnection.
 The core hosting the terminal applies its `size_policy` setting.
+Taller desktop panes get a cleared replacement paint when the grid or pane
+changes size. Their scrolling region stays within the shared grid; `CSI r` and `RIS`
+resets are bounded too, so old rows do not remain below an inline TUI.
+This uses terminal bytes; the app does not need resize-frame support.
 Observers never control size, and a viewer returning after a dropped line
 does not constrain the desktop until active again. Attach placeholders are
 ignored until a window reports geometry. Sized desktop viewers keep their

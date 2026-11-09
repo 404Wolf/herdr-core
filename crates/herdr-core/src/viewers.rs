@@ -142,6 +142,9 @@ impl Core {
         let recovering = viewers.get(&id).into_iter().flatten().any(|v| v.recovering);
         let (out, recovered) =
             if recovering { relay.feed_to_ground(screen, bytes) } else { (relay.feed(screen, bytes), None) };
+        let bounded_out = relay.bounded_output(&out, 0);
+        let bounded_tail = recovered.as_ref().and_then(|(at, _)| relay.bounded_output(&out, *at));
+        let rows = screen.size().1;
         let win32_input = relay.win32_input.take();
         if let Some(watchers) = output_watch.get_mut(&id).filter(|_| !scrolling) {
             watchers.retain(|w| w.send(out.clone()).is_ok());
@@ -161,18 +164,23 @@ impl Core {
         }
         let recovered = recovered.map(|(at, paint)| {
             let mut paint = paint_state(st, id, paint);
+            let mut bounded = paint.clone();
+            bounded.extend_from_slice(bounded_tail.as_deref().unwrap_or(&out[at..]));
             paint.extend_from_slice(&out[at..]);
-            paint
+            (paint, bounded)
         });
         let mut behind = Vec::new();
         for (index, v) in st.viewers.get_mut(&id).into_iter().flatten().enumerate().filter(|_| !scrolling) {
             if v.repaint_pending {
                 continue;
             }
+            let taller = !v.observe && v.sized && v.desktop_group.is_some() && v.size.1 > rows;
             let bytes = if v.recovering {
                 let Some(paint) = &recovered else { continue };
                 v.recovering = false;
-                paint
+                if taller { &paint.1 } else { &paint.0 }
+            } else if taller {
+                bounded_out.as_deref().unwrap_or(&out)
             } else {
                 &out
             };
@@ -289,7 +297,9 @@ impl Core {
         self.touch(&mut st, conn, channel, |v| {
             v.size = (cols, rows);
             v.sized = true;
+            v.repaint_pending |= !v.observe && v.desktop_group.is_some();
         });
+        conn.wake.notify_one();
     }
 
     pub fn viewer_facts(&self, conn: &Arc<Conn>, channel: u32, display: Display) {
@@ -367,9 +377,14 @@ impl Core {
             link.send(&proto::json_frame(proto::RESIZE, id, &proto::Size { cols, rows }));
         }
         let size = [cols.to_le_bytes(), rows.to_le_bytes()].concat();
-        for v in st.viewers.get_mut(&id).into_iter().flatten().filter(|v| v.resize_notifications) {
-            v.repaint_pending = true;
-            v.conn.with(|out| out.resize(v.channel, &size));
+        for v in st.viewers.get_mut(&id).into_iter().flatten() {
+            if v.resize_notifications {
+                v.repaint_pending = true;
+                v.conn.with(|out| out.resize(v.channel, &size));
+            } else if !v.observe && v.sized && v.desktop_group.is_some() {
+                v.repaint_pending = true;
+                v.conn.wake.notify_one();
+            }
         }
         self.save_soon();
         self.emit(st, "size", id, serde_json::json!({"cols": cols, "rows": rows}));
@@ -396,7 +411,11 @@ impl Core {
         let recovering = st.screens[&id].continuation().is_none();
         for v in st.viewers.get_mut(&id).into_iter().flatten().filter(|v| ready(v)) {
             v.conn.with(|out| {
-                out.data(v.channel, &paint);
+                if !v.observe && v.desktop_group.is_some() {
+                    out.repaint(v.channel, &paint);
+                } else {
+                    out.data(v.channel, &paint);
+                }
             });
             v.repaint_pending = false;
             v.recovering = recovering;

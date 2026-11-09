@@ -86,8 +86,7 @@ fn phones_observers_resumed_and_placeholder_viewers_do_not_pin_desktop_size() {
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "zero size does not constrain");
 }
 
-#[test]
-fn resize_drags_serialize_nothing_without_observers_and_only_latest_when_stalled() {
+fn core_with_screen(cols: u16, rows: u16) -> (Arc<Core>, u32, std::path::PathBuf) {
     let root = std::path::PathBuf::from(format!("/var/tmp/hc-resize-{}", crate::platform::random_hex()));
     let paths = crate::paths::Paths {
         socket: root.join("core.sock"),
@@ -101,14 +100,85 @@ fn resize_drags_serialize_nothing_without_observers_and_only_latest_when_stalled
         let mut st = core.lock();
         let id = st
             .reg
-            .create(
-                crate::terminals::NewTerminal { argv: vec!["sh".into()], cols: 80, rows: 24, ..Default::default() },
-                0,
-            )
+            .create(crate::terminals::NewTerminal { argv: vec!["sh".into()], cols, rows, ..Default::default() }, 0)
             .unwrap();
-        st.screens.insert(id, ghostty_vt::Terminal::new(80, 24, 1 << 20));
+        st.screens.insert(id, ghostty_vt::Terminal::new(cols, rows, 1 << 20));
         id
     };
+    (core, id, root)
+}
+
+fn drain(conn: &Arc<Conn>, channel: u32, screen: &mut ghostty_vt::Terminal) {
+    conn.with(|out| {
+        out.resume(channel);
+        while let Some(frame) = out.next_frame() {
+            if frame[4] == wire::DATA {
+                screen.write(&frame[wire::HEADER..]);
+            }
+        }
+    });
+}
+
+#[test]
+fn larger_desktop_viewers_keep_only_the_shared_scrolling_grid() {
+    let (core, id, root) = core_with_screen(20, 4);
+    let tall = desktop_conn();
+    let short = desktop_conn();
+    let request = |size| AttachRequest {
+        observe: false,
+        resize_notifications: false,
+        history: 0,
+        size,
+        display: Display::default(),
+        resumed: false,
+        desktop_group: Some(("local".into(), "desktop".into())),
+    };
+    let a = core.attach(&tall, id, request((20, 8))).unwrap();
+    core.viewer_resize(&tall, a, 20, 8);
+    let b = core.attach(&short, id, request((20, 4))).unwrap();
+    core.viewer_resize(&short, b, 20, 4);
+    tall.with(|out| out.resume(a));
+    short.with(|out| out.resume(b));
+    let mut tall_screen = ghostty_vt::Terminal::new(20, 8, 1 << 20);
+    tall_screen.write(b"old tall pane\x1b[7;1HSTALE COPY");
+    let mut short_screen = ghostty_vt::Terminal::new(20, 4, 1 << 20);
+    let scrolling: Vec<u8> = (1..=500).flat_map(|n| format!("line {n}\r\n").into_bytes()).collect();
+    for bytes in [
+        scrolling.as_slice(),
+        b"\x1b[2A\rrewritten inline line which wraps\x1b[K",
+        b"\x1b[2;4r\x1b[4;1Hmargin\nscroll\nagain\n",
+        b"\x1b[?1049hALT\r\n1\r\n2\r\n3\r\n4\r\n5",
+        b"\x1b[?1049l\x1b[r\r\nback on main\r\n",
+        b"\x1bcreset\r\n1\r\n2\r\n3\r\n4\r\n5",
+    ] {
+        core.output(&mut core.lock(), id, bytes);
+        core.prepare_repaints(&tall);
+        core.prepare_repaints(&short);
+        drain(&tall, a, &mut tall_screen);
+        drain(&short, b, &mut short_screen);
+        let expected = core.lock().screens[&id].screen_rows();
+        assert_eq!(short_screen.screen_rows(), expected, "fitting viewer keeps the original stream");
+        let actual = tall_screen.screen_rows();
+        assert_eq!(
+            actual[..4].iter().map(|r| r.trim_end()).collect::<Vec<_>>(),
+            expected.iter().map(|r| r.trim_end()).collect::<Vec<_>>(),
+            "larger pane must show the core's rows"
+        );
+        assert!(actual[4..].iter().all(|r| r.trim().is_empty()), "stale rows below the shared grid: {actual:?}");
+    }
+    tall_screen.resize(20, 12);
+    tall_screen.write(b"\x1b[11;1HSTALE AFTER RESIZE");
+    core.viewer_resize(&tall, a, 20, 12); // The shared PTY stays 20x4.
+    core.prepare_repaints(&tall);
+    drain(&tall, a, &mut tall_screen);
+    assert!(tall_screen.screen_rows()[4..].iter().all(|r| r.trim().is_empty()));
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn resize_drags_serialize_nothing_without_observers_and_only_latest_when_stalled() {
+    let (core, id, root) = core_with_screen(80, 24);
     let leader = Arc::new(Conn::default());
     let request = |observe, resize_notifications| AttachRequest {
         observe,

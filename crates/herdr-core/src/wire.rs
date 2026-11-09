@@ -221,6 +221,15 @@ impl Outbox {
         }
     }
 
+    /// Replace obsolete bytes with a self-contained paint, without a RESIZE
+    /// frame: legacy desktop clients keep their own pane geometry.
+    pub fn repaint(&mut self, channel: u32, bytes: &[u8]) {
+        if let Some(s) = self.streams.get_mut(&channel) {
+            s.pending.clear();
+            s.pending.extend(bytes);
+        }
+    }
+
     /// Ends a stream now (the viewer detached): whatever is queued is dropped.
     pub fn close(&mut self, channel: u32, reason: &[u8]) {
         self.streams.remove(&channel);

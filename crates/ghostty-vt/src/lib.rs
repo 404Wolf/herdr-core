@@ -767,6 +767,9 @@ impl Terminal {
         if self.alt_screen() {
             out.extend(b"\x1b[?1049h");
         }
+        // A viewer can have more rows than this PTY. Its default scrolling
+        // bottom would then be wrong even though the painted cells fit.
+        out.extend(format!("\x1b[1;{rows}r").as_bytes());
         // The soft reset above put the viewer's cursor back to its default; a
         // shape the program chose (vi-mode's bar, say) goes back on. Before the
         // screen, so a later DEC 12 blink change in its modes still wins.

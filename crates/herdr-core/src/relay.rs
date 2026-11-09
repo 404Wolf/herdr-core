@@ -22,6 +22,8 @@ pub struct Relay {
     /// The program's latest win32-input-mode request (DEC 9001, ConPTY's ask
     /// for key events), until taken. The screen doesn't keep it.
     pub win32_input: Option<bool>,
+    /// Complete scroll-region controls, rewritten only for taller viewers.
+    scroll_regions: Vec<(std::ops::Range<usize>, Vec<u8>)>,
 }
 
 enum Seq {
@@ -53,6 +55,7 @@ impl Relay {
     /// Feeds program output; returns what viewers should get. Replies the
     /// screen produced are left in it for the caller to send to the program.
     pub fn feed(&mut self, screen: &mut Screen, input: &[u8]) -> Vec<u8> {
+        self.scroll_regions.clear();
         let mut out = Vec::with_capacity(input.len());
         let mut run = 0;
         for (i, &b) in input.iter().enumerate() {
@@ -73,6 +76,11 @@ impl Relay {
                         out.extend_from_slice(&seq); // not answered here: the viewer may
                     }
                 } else {
+                    if let Some(bounded) = bounded_scroll(&seq, screen.size().1)
+                        && screen.continuation().is_some_and(|pending| pending.is_empty())
+                    {
+                        self.scroll_regions.push((out.len()..out.len() + seq.len(), bounded));
+                    }
                     if let Some(on) = win32_input(&seq) {
                         self.win32_input = Some(on);
                     }
@@ -99,6 +107,7 @@ impl Relay {
     /// A viewer missed a sequence too large to replay. Consume just its tail,
     /// capturing a repaint at ground even if this read also starts another image.
     pub fn feed_to_ground(&mut self, screen: &mut Screen, input: &[u8]) -> (Vec<u8>, Option<(usize, Vec<u8>)>) {
+        self.scroll_regions.clear();
         let mut bytes = std::mem::take(&mut self.held);
         bytes.extend_from_slice(input);
         let Some(n) = screen.write_until_ground(&bytes) else {
@@ -110,7 +119,26 @@ impl Relay {
         let paint = screen.paint(0);
         let mut out = bytes[..n].to_vec();
         out.extend(self.feed(screen, &bytes[n..]));
+        for (range, _) in &mut self.scroll_regions {
+            range.start += n;
+            range.end += n;
+        }
         (out, Some((n, paint)))
+    }
+
+    /// Keep the program's scrolling region inside its PTY when the viewer is taller.
+    pub fn bounded_output(&self, out: &[u8], from: usize) -> Option<Vec<u8>> {
+        let mut regions = self.scroll_regions.iter().filter(|(range, _)| range.start >= from).peekable();
+        regions.peek()?;
+        let mut bounded = Vec::new();
+        let mut at = from;
+        for (range, replacement) in regions {
+            bounded.extend_from_slice(&out[at..range.start]);
+            bounded.extend_from_slice(replacement);
+            at = range.end;
+        }
+        bounded.extend_from_slice(&out[at..]);
+        Some(bounded)
     }
 
     /// Writes a half-received sequence to the screen (before a snapshot).
@@ -146,6 +174,25 @@ impl Relay {
             Some(_) => Seq::Done { maybe_query: false },
         }
     }
+}
+
+fn bounded_scroll(seq: &[u8], rows: u16) -> Option<Vec<u8>> {
+    if seq == b"\x1bc" {
+        return Some(format!("\x1bc\x1b[1;{rows}r").into_bytes());
+    }
+    let params = std::str::from_utf8(seq.strip_prefix(b"\x1b[")?.strip_suffix(b"r")?).ok()?;
+    if !params.bytes().all(|b| b.is_ascii_digit() || b == b';') {
+        return None;
+    }
+    let mut params = params.split(';');
+    let parse = |s: &str| if s.is_empty() { Some(0) } else { s.parse::<u16>().ok() };
+    let top = parse(params.next()?)?.max(1);
+    let bottom = parse(params.next().unwrap_or(""))?;
+    if params.next().is_some() {
+        return None;
+    }
+    let bottom = if bottom == 0 { rows } else { bottom.min(rows) };
+    Some(if top < bottom { format!("\x1b[{top};{bottom}r").into_bytes() } else { Vec::new() })
 }
 
 /// `CSI ? … 9001 … h` or `l`: whether it turns win32-input-mode on.
@@ -191,6 +238,29 @@ mod tests {
             let replies = String::from_utf8_lossy(&screen.take_responses()).into_owned();
             assert!(replies.starts_with("\x1b[?62;22c\x1b]11;rgb:") && replies.ends_with("R"), "{replies:?}");
             assert_eq!(screen.title(), "title");
+        }
+    }
+
+    #[test]
+    fn taller_viewer_regions_survive_split_resets_without_editing_strings() {
+        let mut input = b"a\x1b[rb\x1bcC\x1b[2rD\x1b[7;8rE\x1b]52;c;".to_vec();
+        input.extend(vec![b'x'; 600]);
+        input.extend_from_slice(b"\x1b[r\x07end");
+        let mut expected = b"a\x1b[1;4rb\x1bc\x1b[1;4rC\x1b[2;4rDE\x1b]52;c;".to_vec();
+        expected.extend(vec![b'x'; 600]);
+        expected.extend_from_slice(b"\x1b[r\x07end");
+        for width in [1, 7, input.len()] {
+            let mut screen = Screen::new(20, 4, 1 << 20);
+            let mut relay = Relay::default();
+            let mut normal = Vec::new();
+            let mut bounded = Vec::new();
+            for chunk in input.chunks(width) {
+                let out = relay.feed(&mut screen, chunk);
+                bounded.extend(relay.bounded_output(&out, 0).unwrap_or_else(|| out.clone()));
+                normal.extend(out);
+            }
+            assert_eq!(normal, input, "normal viewers keep every original byte");
+            assert_eq!(bounded, expected, "split width={width}");
         }
     }
 
