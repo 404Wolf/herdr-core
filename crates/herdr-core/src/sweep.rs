@@ -11,9 +11,15 @@ pub const VAR: &str = "HC_SCOPE";
 pub const RUNTIME: &str = "HC_RUNTIME";
 
 /// A fresh cleanup token, stamped with when it was made: no process
-/// started before it can carry it, so a sweep need not read those.
+/// started before it can carry it, so a sweep need not read those. On Linux
+/// also with the last process ID handed out then: whatever carries it got a
+/// later one, so a sweep need not even look at the others (every exec ends in
+/// a sweep, and a busy machine runs thousands of processes).
 pub fn token() -> String {
-    format!("{}-{}", now(), crate::platform::random_hex())
+    match last_pid() {
+        Some(pid) => format!("{}-p{pid}-{}", now(), crate::platform::random_hex()),
+        None => format!("{}-{}", now(), crate::platform::random_hex()),
+    }
 }
 
 /// The oldest a process carrying one of `tokens` can be (`now()`'s clock); 0
@@ -22,6 +28,53 @@ pub fn token() -> String {
 fn oldest(tokens: &[String]) -> u64 {
     let stamp = |t: &String| t.split_once('-').and_then(|(s, _)| s.parse::<u64>().ok());
     tokens.iter().map(stamp).min().flatten().unwrap_or(0)
+}
+
+/// The earliest process ID handed out when one of `tokens` was made: the
+/// last ID then. None when one has none (made elsewhere, or by an older hc).
+#[cfg(unix)]
+fn first_pid(tokens: &[String]) -> Option<i32> {
+    let pid = |t: &String| t.split('-').nth(1)?.strip_prefix('p')?.parse::<i32>().ok();
+    tokens.iter().map(pid).collect::<Option<Vec<_>>>()?.into_iter().min()
+}
+
+/// The last process ID handed out in this process's PID namespace, as long as
+/// /proc shows that same namespace (it names us by our own ID).
+#[cfg(target_os = "linux")]
+fn last_pid() -> Option<i32> {
+    let ours = std::fs::read_link("/proc/self").ok()?;
+    if ours.to_str()?.parse::<u32>().ok()? != std::process::id() {
+        return None;
+    }
+    std::fs::read_to_string("/proc/sys/kernel/ns_last_pid").ok()?.trim().parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn last_pid() -> Option<i32> {
+    None
+}
+
+/// Whether a token stamped `stamp` is young enough for its first ID to
+/// narrow a sweep: IDs wrap around, and once they have come round past it
+/// again it says nothing. A busy machine hands out some 50k an hour of the
+/// millions there are; an exec's own sweep runs seconds after its start, a
+/// long-lived terminal's (after a crash) looks at everything.
+#[cfg(target_os = "linux")]
+fn young(stamp: u64) -> bool {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    stamp > 0 && now().saturating_sub(stamp) < 600 * ticks
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn young(_: u64) -> bool {
+    false
+}
+
+/// Whether `pid` was handed out after `first` and up to `last`, the IDs
+/// counting up and wrapping around at most once (see `young`).
+#[cfg(unix)]
+fn handed_out_between(pid: i32, first: i32, last: i32) -> bool {
+    if first <= last { pid > first && pid <= last } else { pid > first || pid <= last }
 }
 
 /// Now, on a clock no process started later can show an earlier start on, even
@@ -104,8 +157,11 @@ pub fn members(tokens: &[String]) -> Vec<i32> {
     let runtime = format!("{RUNTIME}=1").into_bytes();
     let me = std::process::id() as i32;
     let (mut set, mut hc) = (std::collections::HashSet::new(), std::collections::HashSet::new());
-    let live: Vec<(i32, i32, u64)> = processes().into_iter().filter(|(pid, ..)| *pid != me).collect();
+    // Descendants of what carries a token are newer still, so the narrowed
+    // list holds them too.
     let oldest = oldest(tokens);
+    let since = first_pid(tokens).filter(|_| young(oldest));
+    let live: Vec<(i32, i32, u64)> = processes(since).into_iter().filter(|(pid, ..)| *pid != me).collect();
     for &(pid, ..) in live.iter().filter(|(.., started)| *started >= oldest) {
         let Some(env) = environ(pid) else { continue };
         let mut vars = env.split(|b| *b == 0);
@@ -130,9 +186,10 @@ pub fn members(tokens: &[String]) -> Vec<i32> {
 }
 
 /// Every live process as (pid, parent pid, start on `now()`'s clock or
-/// later, `u64::MAX` when unknown); zombies left out.
+/// later, `u64::MAX` when unknown); zombies left out. With `since`, only
+/// those given an ID after it: the others' stat is never read.
 #[cfg(target_os = "linux")]
-fn processes() -> Vec<(i32, i32, u64)> {
+fn processes(since: Option<i32>) -> Vec<(i32, i32, u64)> {
     let stat = |pid: i32| -> Option<(i32, i32, u64)> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
@@ -140,9 +197,18 @@ fn processes() -> Vec<(i32, i32, u64)> {
         let started = fields.get(19).and_then(|t| t.parse().ok()).unwrap_or(u64::MAX); // field 22, in ticks
         (state != "Z" && state != "X").then_some((pid, ppid, started))
     };
-    let pids =
-        std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse().ok());
-    pids.filter_map(stat).collect()
+    let pids: Vec<i32> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .collect();
+    // Read after the listing: every ID in it was handed out by then.
+    let window = since.zip(last_pid());
+    pids.into_iter()
+        .filter(|&pid| window.is_none_or(|(first, last)| handed_out_between(pid, first, last)))
+        .filter_map(stat)
+        .collect()
 }
 
 /// NUL-separated `KEY=value` entries; a zombie has none.
@@ -152,7 +218,7 @@ fn environ(pid: i32) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-fn processes() -> Vec<(i32, i32, u64)> {
+fn processes(_since: Option<i32>) -> Vec<(i32, i32, u64)> {
     let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     let mut pids = vec![0i32; n.max(0) as usize + 64];
     let size = (pids.len() * std::mem::size_of::<i32>()) as libc::c_int;
@@ -194,6 +260,32 @@ mod tests {
         assert!(members(&tokens).is_empty());
         other.kill().unwrap();
         other.wait().unwrap();
+    }
+
+    #[test]
+    fn ids_handed_out_count_up_and_wrap_once() {
+        assert!(handed_out_between(11, 10, 20) && handed_out_between(20, 10, 20));
+        assert!(!handed_out_between(10, 10, 20) && !handed_out_between(21, 10, 20) && !handed_out_between(5, 10, 20));
+        // Wrapped: after `first` up to the top, then from the bottom up to `last`.
+        assert!(handed_out_between(4_000_000, 3_000_000, 50) && handed_out_between(7, 3_000_000, 50));
+        assert!(!handed_out_between(51, 3_000_000, 50) && !handed_out_between(3_000_000, 3_000_000, 50));
+    }
+
+    /// Linux: a fresh token names the last ID, so a sweep reads only newer
+    /// processes, and still finds its own and theirs.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_fresh_token_narrows_the_sweep_to_newer_processes() {
+        let tokens = [token()];
+        let first = first_pid(&tokens).expect("a fresh token names the last ID");
+        assert!(young(oldest(&tokens)));
+        let mut ours = python("import time; time.sleep(30)").env(VAR, &tokens[0]).spawn().unwrap();
+        let newer = processes(Some(first));
+        assert!(newer.iter().any(|(pid, ..)| *pid == ours.id() as i32), "the new process is looked at");
+        assert!(!newer.iter().any(|(pid, ..)| *pid == 1), "init, from before the token, is not");
+        assert_eq!(members_settled(&tokens, 1), [ours.id() as i32]);
+        ours.kill().unwrap();
+        ours.wait().unwrap();
     }
 
     #[test]
