@@ -131,6 +131,11 @@ On Linux, local Herdr app windows share the smallest reported columns and
 rows while the desktop is active. Focus between those windows keeps that
 grid; colors and cell facts still follow the latest active viewer. A phone,
 SSH client, or other viewer takes size control when active, as before.
+The same desktop group is forwarded when attaching to another machine;
+both cores must have this support. `terminal.attach`'s `desktop_group` is
+core-to-core metadata: ordinary clients cannot claim a group. Forwarded
+groups are scoped to the source core line, including after reconnection.
+The core hosting the terminal applies its `size_policy` setting.
 Observers never control size, and a viewer returning after a dropped line
 does not constrain the desktop until active again. Attach placeholders are
 ignored until a window reports geometry. Sized desktop viewers keep their
@@ -138,7 +143,7 @@ constraints while idle, until they detach or report a new size. The app
 keeps background tabs attached without reporting visibility, so a hidden
 tab can also constrain the grid and leave extra blank pane space. Exact
 visibility needs app support. Other operating systems retain latest-active
-sizing. Set
+sizing for local viewers, but accept forwarded desktop groups. Set
 `size_policy = "latest"` in `~/.config/herdr-core/config.toml` to restore
 latest-active sizing on Linux too (default: `"grouped"`). No restart needed;
 the setting applies on the next viewer activity or detach.

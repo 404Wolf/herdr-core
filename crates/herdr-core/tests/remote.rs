@@ -500,6 +500,73 @@ fn a_viewer_back_after_a_dropped_line_does_not_take_the_size() {
     wait_until("the one left leads, at its latest size", || size("t1") == (120, 40));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn desktop_windows_keep_their_group_across_a_remote_line_and_reconnect() {
+    use common::framed::desktop;
+    use herdr_core::wire;
+    let (rohan, s) = with_rohan();
+    let mark = rohan.root.join("mark");
+    let program = format!("while :; do cat {} 2>/dev/null; sleep 0.05; done", mark.display());
+    let t = run(&s, &["--on", "rohan", "sh", "-c", &program]);
+    let size = || (get(&rohan, "t1")["cols"].as_u64().unwrap(), get(&rohan, "t1")["rows"].as_u64().unwrap());
+    let (mut app_a, a) = desktop(&s);
+    let (mut app_b, b) = desktop(&s);
+    let mut a = Viewer::attach_on(a, &t, 100, 20, json!({}));
+    a.conn.send(a.channel, wire::RESIZE, &[100, 0, 20, 0]);
+    a.conn.call("terminal.get", json!({"terminal": t}));
+    let mut b = Viewer::attach_on(b, &t, 80, 30, json!({}));
+    b.conn.send(b.channel, wire::RESIZE, &[80, 0, 30, 0]);
+    b.conn.call("terminal.get", json!({"terminal": t}));
+    assert_eq!(size(), (80, 20), "both windows must fit on the remote PTY too");
+    a.conn.send(a.channel, wire::FOCUS, &[1]);
+    a.conn.call("terminal.get", json!({"terminal": t}));
+    assert_eq!(size(), (80, 20), "remote focus must not reflow");
+
+    std::fs::write(s.root.join("down"), "").unwrap();
+    rohan.hc(&["server", "restart"]);
+    wait_until("rohan unreachable", || s.json(&["machine", "ls"])["machines"][0]["state"] == "unreachable");
+    let here = Viewer::attach(&rohan, "t1", 120, 40, json!({}));
+    std::fs::remove_file(s.root.join("down")).unwrap();
+    wait_until("rohan back", || s.json(&["machine", "ls"])["machines"][0]["state"] == "connected");
+    std::fs::write(&mark, "MARK-both-back\n").unwrap();
+    a.shows("MARK-both-back");
+    b.shows("MARK-both-back");
+    assert_eq!(size(), (120, 40), "resumed desktop viewers do not claim activity");
+    a.conn.send(a.channel, wire::RESIZE, &[100, 0, 20, 0]);
+    b.conn.send(b.channel, wire::RESIZE, &[80, 0, 30, 0]);
+    b.conn.call("terminal.get", json!({"terminal": t}));
+    wait_until("desktop group survives reattachment", || size() == (80, 20));
+    a.conn.send(a.channel, wire::FOCUS, &[1]);
+    a.conn.call("terminal.get", json!({"terminal": t}));
+    assert_eq!(size(), (80, 20));
+    drop(here);
+    drop(a);
+    wait_until("detaching releases the remote constraint", || size() == (80, 30));
+    drop(b);
+    app_a.wait().unwrap();
+    app_b.wait().unwrap();
+}
+
+#[test]
+fn plain_clients_cannot_claim_a_desktop_group_even_through_a_relay() {
+    use herdr_core::wire;
+    let (rohan, s) = with_rohan();
+    let t = run(&s, &["--on", "rohan", "sleep", "100"]);
+    let size = || (get(&rohan, "t1")["cols"].as_u64().unwrap(), get(&rohan, "t1")["rows"].as_u64().unwrap());
+    for (session, terminal) in [(&rohan, "t1"), (&s, t.as_str())] {
+        let mut a = Viewer::attach(session, terminal, 80, 20, json!({"desktop_group": "forged"}));
+        a.conn.send(a.channel, wire::RESIZE, &[80, 0, 20, 0]);
+        let mut b = Viewer::attach(session, terminal, 100, 30, json!({"desktop_group": "forged"}));
+        b.conn.send(b.channel, wire::RESIZE, &[100, 0, 30, 0]);
+        b.conn.call("terminal.get", json!({"terminal": terminal}));
+        assert_eq!(size(), (100, 30), "an ordinary client cannot opt into grouping");
+        a.conn.send(a.channel, wire::FOCUS, &[1]);
+        a.conn.call("terminal.get", json!({"terminal": terminal}));
+        assert_eq!(size(), (80, 20));
+    }
+}
+
 #[test]
 fn a_run_or_wait_there_rides_out_a_dropped_line() {
     let (rohan, s) = with_rohan();

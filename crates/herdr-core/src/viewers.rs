@@ -39,6 +39,8 @@ pub struct Viewer {
     active_at: Option<Instant>,
     /// Desktop apps attach hidden tabs with a placeholder before reporting geometry.
     sized: bool,
+    /// The source line's machine and the desktop identity carried on that line.
+    desktop_group: Option<(String, String)>,
     display: Display,
     /// An unfinished sequence exceeded continuation tracking; skip its tail.
     pub(crate) recovering: bool,
@@ -64,9 +66,21 @@ pub struct AttachRequest {
     pub size: (u16, u16),
     pub display: Display,
     pub resumed: bool,
+    pub desktop_group: Option<(String, String)>,
 }
 
 impl Core {
+    /// Local desktop identity is observed; forwarded identity is accepted only
+    /// from an established core line and namespaced by that line's machine.
+    pub(crate) fn desktop_group(&self, conn: &Arc<Conn>, reported: Option<&str>) -> Option<(String, String)> {
+        if conn.local_desktop {
+            return Some((self.info.id.clone(), self.info.id.clone()));
+        }
+        let group = reported.filter(|group| !group.is_empty())?;
+        let key = crate::remote::conn_key(conn);
+        self.lock().peer_lines.iter().find(|(_, (k, _))| *k == key).map(|(id, _)| (id.clone(), group.to_owned()))
+    }
+
     /// Adds a viewer: queues the first paint, then every live byte follows in order.
     pub fn attach(&self, conn: &Arc<Conn>, id: u32, req: AttachRequest) -> Result<u32, RpcError> {
         let mut st = self.lock();
@@ -91,6 +105,7 @@ impl Core {
             size: req.size,
             active_at: (!req.resumed).then(Instant::now),
             sized: false,
+            desktop_group: req.desktop_group,
             display: req.display,
             recovering,
         });
@@ -404,11 +419,16 @@ impl Core {
 fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u16, u16)>) {
     let leader = viewers.iter().filter(|v| !v.observe).max_by_key(|v| v.active_at);
     let Some(leader) = leader else { return (None, None) };
-    let size = if grouped && leader.conn.local_desktop {
+    let size = if grouped && leader.desktop_group.is_some() {
         viewers
             .iter()
             .filter(|v| {
-                !v.observe && v.conn.local_desktop && v.sized && v.size.0 > 0 && v.size.1 > 0 && v.active_at.is_some()
+                !v.observe
+                    && v.desktop_group == leader.desktop_group
+                    && v.sized
+                    && v.size.0 > 0
+                    && v.size.1 > 0
+                    && v.active_at.is_some()
             })
             .map(|v| v.size)
             .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))

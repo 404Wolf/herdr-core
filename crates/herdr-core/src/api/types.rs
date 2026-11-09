@@ -402,6 +402,10 @@ pub struct AttachParams {
     #[arg(skip)]
     #[serde(default)]
     pub resumed: bool,
+    /// Desktop identity forwarded by a core line; ignored from ordinary clients.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_group: Option<String>,
     /// Who is calling (`HC_TERMINAL_ID` inside a terminal): never itself.
     #[arg(skip)]
     #[serde(default)]

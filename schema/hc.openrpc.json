@@ -2298,6 +2298,18 @@
           }
         },
         {
+          "description": "Desktop identity forwarded by a core line; ignored from ordinary clients.",
+          "name": "desktop_group",
+          "required": false,
+          "schema": {
+            "description": "Desktop identity forwarded by a core line; ignored from ordinary clients.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
           "description": "The viewer's own colors and cell size, used to answer display queries.",
           "name": "display",
           "required": false,

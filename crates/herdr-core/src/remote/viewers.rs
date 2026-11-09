@@ -82,6 +82,9 @@ pub(super) fn negotiate_resize(line: &Line, params: &mut Value) {
 /// Opens a viewer here on a terminal there: the stream channel there is
 /// relayed to a new channel on this connection, both ways.
 pub async fn attach(core: &Core, conn: &Arc<Conn>, m: &Machine, mut params: Value) -> Result<Value, RpcError> {
+    // Never launder an ordinary client's claimed desktop through our trusted line.
+    params["desktop_group"] =
+        core.desktop_group(conn, params["desktop_group"].as_str()).map_or(Value::Null, |(_, group)| group.into());
     let line = line(core, m).await?;
     negotiate_resize(&line, &mut params);
     let here = conn.new_channel();

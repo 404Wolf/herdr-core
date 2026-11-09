@@ -31,6 +31,7 @@ async fn keys_pressed_during_a_paste_follow_its_submit() {
                 size: (80, 24),
                 display: Display::default(),
                 resumed: false,
+                desktop_group: None,
             },
         )
         .unwrap();

@@ -22,6 +22,7 @@ fn viewer(conn: &Arc<Conn>, size: (u16, u16), active_at: Option<Instant>) -> Vie
         size,
         active_at,
         sized: true,
+        desktop_group: conn.local_desktop.then(|| ("local".into(), "desktop".into())),
         display: Display::default(),
         recovering: false,
     }
@@ -43,6 +44,20 @@ fn desktop_windows_fit_both_axes_without_focus_reflow_and_keep_latest_display() 
     assert_eq!(viewer_size(&vs, false).1, Some((80, 30)), "latest policy remains available");
     vs.pop();
     assert_eq!(viewer_size(&vs, true).1, Some((100, 20)), "detach releases the constraint");
+}
+
+#[test]
+fn forwarded_desktops_are_scoped_by_both_line_and_group() {
+    let now = Instant::now();
+    let conn = Arc::new(Conn::default());
+    let mut vs = vec![viewer(&conn, (100, 20), Some(now)), viewer(&conn, (80, 30), Some(now))];
+    vs[0].desktop_group = Some(("line-a".into(), "desktop".into()));
+    vs[1].desktop_group = Some(("line-b".into(), "desktop".into()));
+    assert_eq!(viewer_size(&vs, true).1, Some((80, 30)), "another source line is another group");
+    vs[1].desktop_group = Some(("line-a".into(), "another-desktop".into()));
+    assert_eq!(viewer_size(&vs, true).1, Some((80, 30)), "one line can forward different desktops");
+    vs[1].desktop_group = vs[0].desktop_group.clone();
+    assert_eq!(viewer_size(&vs, true).1, Some((80, 20)), "only an identical pair shares the grid");
 }
 
 #[test]
@@ -102,6 +117,7 @@ fn resize_drags_serialize_nothing_without_observers_and_only_latest_when_stalled
         size: (80, 24),
         display: Display::default(),
         resumed: false,
+        desktop_group: None,
     };
     let channel = core.attach(&leader, id, request(false, false)).unwrap();
     PAINTS.set(0);

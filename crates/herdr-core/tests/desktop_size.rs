@@ -2,30 +2,10 @@
 
 mod common;
 
-use common::framed::{Framed, Viewer};
+use common::framed::{Framed, Viewer, desktop};
 use common::*;
 use herdr_core::wire;
 use serde_json::json;
-use std::os::fd::OwnedFd;
-use std::os::unix::net::UnixStream;
-use std::process::{Child, Stdio};
-
-/// The same process/socket shape as the prebuilt app: herdr-app -> hc connect.
-fn desktop(s: &Session) -> (Child, Framed) {
-    let app = s.root.join("herdr-app");
-    if !app.exists() {
-        std::fs::copy("/bin/sh", &app).unwrap();
-    }
-    let (client, bridge) = UnixStream::pair().unwrap();
-    let child = s
-        .program(app)
-        .args(["-c", "\"$1\" connect; :", "app", BIN])
-        .stdin(Stdio::from(OwnedFd::from(bridge.try_clone().unwrap())))
-        .stdout(Stdio::from(OwnedFd::from(bridge)))
-        .spawn()
-        .unwrap();
-    (child, Framed::from_stream(client))
-}
 
 #[test]
 fn local_windows_share_a_real_pty_size_but_remote_input_still_takes_over() {

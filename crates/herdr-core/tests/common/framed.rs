@@ -84,7 +84,10 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn attach(s: &Session, terminal: &str, cols: u16, rows: u16, extra: Value) -> Viewer {
-        let mut conn = Framed::open(s);
+        Self::attach_on(Framed::open(s), terminal, cols, rows, extra)
+    }
+
+    pub fn attach_on(mut conn: Framed, terminal: &str, cols: u16, rows: u16, extra: Value) -> Viewer {
         let mut params = json!({"terminal": terminal, "cols": cols, "rows": rows});
         params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         let reply = conn.call("terminal.attach", params);
@@ -149,4 +152,25 @@ impl Viewer {
     pub fn typed(&mut self, bytes: &[u8]) {
         self.conn.send(self.channel, wire::DATA, bytes);
     }
+}
+
+#[cfg(target_os = "linux")]
+/// The same process/socket shape as the prebuilt app: herdr-app -> hc connect.
+pub fn desktop(s: &Session) -> (std::process::Child, Framed) {
+    use super::BIN;
+    use std::os::fd::OwnedFd;
+    use std::process::Stdio;
+    let app = s.root.join("herdr-app");
+    if !app.exists() {
+        std::fs::copy("/bin/sh", &app).unwrap();
+    }
+    let (client, bridge) = UnixStream::pair().unwrap();
+    let child = s
+        .program(app)
+        .args(["-c", "\"$1\" connect; :", "app", BIN])
+        .stdin(Stdio::from(OwnedFd::from(bridge.try_clone().unwrap())))
+        .stdout(Stdio::from(OwnedFd::from(bridge)))
+        .spawn()
+        .unwrap();
+    (child, Framed::from_stream(client))
 }
