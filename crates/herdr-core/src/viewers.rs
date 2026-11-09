@@ -37,6 +37,8 @@ pub struct Viewer {
     size: (u16, u16),
     /// None: not active since it came back after a dropped line.
     active_at: Option<Instant>,
+    /// Desktop apps attach hidden tabs with a placeholder before reporting geometry.
+    sized: bool,
     display: Display,
     /// An unfinished sequence exceeded continuation tracking; skip its tail.
     pub(crate) recovering: bool,
@@ -88,6 +90,7 @@ impl Core {
             repaint_pending: false,
             size: req.size,
             active_at: (!req.resumed).then(Instant::now),
+            sized: false,
             display: req.display,
             recovering,
         });
@@ -239,7 +242,7 @@ impl Core {
         })
     }
 
-    /// Typing, resizing or focusing makes a viewer the one whose size and colors count.
+    /// Activity selects the device group and the viewer whose display facts count.
     fn touch(&self, st: &mut State, conn: &Arc<Conn>, channel: u32, f: impl FnOnce(&mut Viewer)) -> Option<u32> {
         let (id, v) = Self::viewer(st, conn, channel)?;
         f(v);
@@ -268,7 +271,10 @@ impl Core {
 
     pub fn viewer_resize(&self, conn: &Arc<Conn>, channel: u32, cols: u16, rows: u16) {
         let mut st = self.lock();
-        self.touch(&mut st, conn, channel, |v| v.size = (cols, rows));
+        self.touch(&mut st, conn, channel, |v| {
+            v.size = (cols, rows);
+            v.sized = true;
+        });
     }
 
     pub fn viewer_facts(&self, conn: &Arc<Conn>, channel: u32, display: Display) {
@@ -323,11 +329,13 @@ impl Core {
         }
     }
 
-    /// The most recently active typing viewer sets size and display facts;
-    /// with none, the terminal runs headless.
+    /// Fit the active device's desktop windows; display facts still follow activity.
     fn apply_size(&self, st: &mut State, id: u32) {
-        let leader = st.viewers.get(&id).and_then(|vs| vs.iter().filter(|v| !v.observe).max_by_key(|v| v.active_at));
-        let (cols, rows) = leader.map_or_else(|| self.headless(), |v| v.size);
+        let (leader, size) = viewer_size(
+            st.viewers.get(&id).map_or(&[], Vec::as_slice),
+            self.settings().size_policy == crate::config::SizePolicy::Grouped,
+        );
+        let (cols, rows) = size.unwrap_or_else(|| self.headless());
         let display = leader.map(|v| v.display.clone());
         if !st.screens.contains_key(&id) {
             return;
@@ -391,6 +399,24 @@ impl Core {
             link.input(id, &replies);
         }
     }
+}
+
+fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u16, u16)>) {
+    let leader = viewers.iter().filter(|v| !v.observe).max_by_key(|v| v.active_at);
+    let Some(leader) = leader else { return (None, None) };
+    let size = if grouped && leader.conn.local_desktop {
+        viewers
+            .iter()
+            .filter(|v| {
+                !v.observe && v.conn.local_desktop && v.sized && v.size.0 > 0 && v.size.1 > 0 && v.active_at.is_some()
+            })
+            .map(|v| v.size)
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
+            .unwrap_or(leader.size)
+    } else {
+        leader.size
+    };
+    (Some(leader), Some(size))
 }
 
 /// The screen, then the latest 7501 report of every record and whether the

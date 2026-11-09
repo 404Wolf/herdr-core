@@ -10,6 +10,23 @@ pub use unix::*;
 #[cfg(target_os = "linux")]
 pub mod systemd;
 
+#[cfg(target_os = "linux")]
+mod desktop_peer;
+
+/// Only Linux can currently identify the desktop peer reliably. Other OSes
+/// retain their existing latest-viewer behavior.
+pub(crate) fn local_desktop_viewer(read: &AsyncRead) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        desktop_peer::is_desktop(read)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = read;
+        false
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_bundle;
 #[cfg(target_os = "macos")]

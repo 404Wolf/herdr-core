@@ -141,6 +141,7 @@ fn hostname() -> String {
 /// A connection starts in plain mode (one JSON-RPC message per line);
 /// a successful `hello` with `framed: true` switches it to frames.
 async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Writer) -> io::Result<()> {
+    let local_desktop = platform::local_desktop_viewer(&read);
     let mut read = BufReader::new(read);
     let mut line = String::new();
     let plain = std::sync::Mutex::new(None);
@@ -184,7 +185,9 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
             break;
         }
     }
-    let conn = Arc::new(Conn::default());
+    let mut conn = Conn::default();
+    conn.local_desktop = local_desktop;
+    let conn = Arc::new(conn);
     let mut writer = tokio::spawn(write_frames(core.clone(), conn.clone(), write));
     // Another core dialing in says who it is in its hello.
     let hello: Value = serde_json::from_str(&line).unwrap_or_default();

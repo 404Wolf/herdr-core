@@ -127,6 +127,22 @@ still resize the terminal normally. `display: {fg, bg, cursor, cell}` (as in
 `terminal.attach`) likewise answers the program's color and cell-size queries
 from its start, before any viewer attaches.
 
+On Linux, local Herdr app windows share the smallest reported columns and
+rows while the desktop is active. Focus between those windows keeps that
+grid; colors and cell facts still follow the latest active viewer. A phone,
+SSH client, or other viewer takes size control when active, as before.
+Observers never control size, and a viewer returning after a dropped line
+does not constrain the desktop until active again. Attach placeholders are
+ignored until a window reports geometry. Sized desktop viewers keep their
+constraints while idle, until they detach or report a new size. The app
+keeps background tabs attached without reporting visibility, so a hidden
+tab can also constrain the grid and leave extra blank pane space. Exact
+visibility needs app support. Other operating systems retain latest-active
+sizing. Set
+`size_policy = "latest"` in `~/.config/herdr-core/config.toml` to restore
+latest-active sizing on Linux too (default: `"grouped"`). No restart needed;
+the setting applies on the next viewer activity or detach.
+
 ```sh
 hc run cargo test                  # wait, stream output, return its exit code
 hc run "cd app && bun test"        # one quoted string is a shell command

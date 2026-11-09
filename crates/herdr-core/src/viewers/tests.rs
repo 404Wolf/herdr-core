@@ -6,6 +6,71 @@ thread_local! {
     pub(super) static PAINTS: Cell<usize> = const { Cell::new(0) };
 }
 
+fn desktop_conn() -> Arc<Conn> {
+    let mut conn = Conn::default();
+    conn.local_desktop = true;
+    Arc::new(conn)
+}
+
+fn viewer(conn: &Arc<Conn>, size: (u16, u16), active_at: Option<Instant>) -> Viewer {
+    Viewer {
+        conn: conn.clone(),
+        channel: 1,
+        observe: false,
+        resize_notifications: false,
+        repaint_pending: false,
+        size,
+        active_at,
+        sized: true,
+        display: Display::default(),
+        recovering: false,
+    }
+}
+
+#[test]
+fn desktop_windows_fit_both_axes_without_focus_reflow_and_keep_latest_display() {
+    let now = Instant::now();
+    let a = desktop_conn();
+    let b = desktop_conn();
+    let mut vs = vec![viewer(&a, (100, 20), Some(now)), viewer(&b, (80, 30), Some(now))];
+    vs[0].display.bg = Some("#ffffff".into());
+    vs[0].active_at = Some(now + std::time::Duration::from_secs(1));
+    let (leader, size) = viewer_size(&vs, true);
+    assert_eq!(size, Some((80, 20)));
+    assert_eq!(leader.unwrap().display.bg.as_deref(), Some("#ffffff"));
+    vs[1].active_at = Some(now + std::time::Duration::from_secs(2));
+    assert_eq!(viewer_size(&vs, true).1, Some((80, 20)));
+    assert_eq!(viewer_size(&vs, false).1, Some((80, 30)), "latest policy remains available");
+    vs.pop();
+    assert_eq!(viewer_size(&vs, true).1, Some((100, 20)), "detach releases the constraint");
+}
+
+#[test]
+fn phones_observers_resumed_and_placeholder_viewers_do_not_pin_desktop_size() {
+    let now = Instant::now();
+    let desktop = desktop_conn();
+    let phone = Arc::new(Conn::default());
+    let mut vs = vec![viewer(&desktop, (100, 30), Some(now)), viewer(&phone, (40, 10), Some(now))];
+    vs[0].active_at = Some(now + std::time::Duration::from_secs(1));
+    assert_eq!(viewer_size(&vs, true).1, Some((100, 30)));
+    vs[1].active_at = Some(now + std::time::Duration::from_secs(2));
+    assert_eq!(viewer_size(&vs, true).1, Some((40, 10)), "phone activity still takes over");
+    vs[1].observe = true;
+    assert_eq!(viewer_size(&vs, true).1, Some((100, 30)));
+    vs[1] = viewer(&desktop, (40, 10), None);
+    assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "reconnect is not activity");
+    vs[1].active_at = Some(now);
+    vs[1].sized = false;
+    assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "hidden attach placeholders do not constrain");
+    vs[1].sized = true;
+    assert_eq!(viewer_size(&vs, true).1, Some((40, 10)));
+    vs[1].active_at = Some(now - std::time::Duration::from_secs(3600));
+    assert_eq!(viewer_size(&vs, true).1, Some((40, 10)), "an idle visible window must still fit");
+    vs[1].active_at = Some(now);
+    vs[1].size = (0, 0);
+    assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "zero size does not constrain");
+}
+
 #[test]
 fn resize_drags_serialize_nothing_without_observers_and_only_latest_when_stalled() {
     let root = std::path::PathBuf::from(format!("/var/tmp/hc-resize-{}", crate::platform::random_hex()));

@@ -116,6 +116,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for Watched<'_, R> {
 /// A framed connection as the rest of the core sees it: queue frames, wake the writer.
 #[derive(Default)]
 pub struct Conn {
+    /// A verified local desktop app (possibly through its `hc connect` child).
+    pub(crate) local_desktop: bool,
     outbox: std::sync::Mutex<Outbox>,
     pub wake: tokio::sync::Notify,
     /// It fell too far behind (`MAX_CONTROL`): the connection must end.

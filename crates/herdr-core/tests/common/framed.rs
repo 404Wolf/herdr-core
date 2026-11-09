@@ -22,6 +22,10 @@ impl Framed {
     pub fn open(s: &Session) -> Framed {
         s.json(&["server", "start"]);
         let stream = UnixStream::connect(s.socket()).unwrap();
+        Self::from_stream(stream)
+    }
+
+    pub fn from_stream(stream: UnixStream) -> Framed {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut writer = stream;
         writeln!(writer, r#"{{"jsonrpc":"2.0","id":0,"method":"hello","params":{{"framed":true}}}}"#).unwrap();

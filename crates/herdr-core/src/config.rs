@@ -19,6 +19,9 @@ pub struct Config {
     pub notes_quiet: Option<f64>,
     /// Size of a terminal nobody is typing in, `COLSxROWS` (default 200x120).
     pub headless: Option<String>,
+    /// Fit local desktop windows together (default), or use the latest active viewer.
+    #[serde(default)]
+    pub size_policy: SizePolicy,
     /// Scrollback kept per live terminal, in MB (default 5).
     pub history_mb: Option<f64>,
     /// Where the core listens (default under $XDG_RUNTIME_DIR). `HC_SOCKET` wins.
@@ -27,6 +30,14 @@ pub struct Config {
     /// timeout on top), and to send anything at all before its line is
     /// given up and dialed again (default 30).
     pub machine_timeout: Option<f64>,
+}
+
+#[derive(Deserialize, Default, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum SizePolicy {
+    #[default]
+    Grouped,
+    Latest,
 }
 
 impl Config {
@@ -93,6 +104,13 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_sizing_defaults_and_latest_can_be_selected() {
+        assert_eq!(toml::from_str::<Config>("").unwrap().size_policy, SizePolicy::Grouped);
+        assert_eq!(toml::from_str::<Config>("size_policy = 'latest'").unwrap().size_policy, SizePolicy::Latest);
+        assert!(toml::from_str::<Config>("size_policy = 'unknown'").is_err());
+    }
 
     fn key(spec: &str) -> Result<DetachKey, RpcError> {
         Config { detach_key: Some(spec.into()), ..Default::default() }.detach_key()
