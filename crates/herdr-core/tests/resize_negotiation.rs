@@ -29,7 +29,7 @@ fn attach_confirms_size_notifications_locally_and_through_two_relays() {
                     "observe": observe, "resize_notifications": requested
                 }),
             );
-            let enabled = observe && requested;
+            let enabled = requested;
             assert_eq!(reply["result"]["resize_notifications"], enabled, "{reply}");
             if enabled {
                 let channel = reply["result"]["channel"].as_u64().unwrap() as u32;
@@ -37,5 +37,31 @@ fn attach_confirms_size_notifications_locally_and_through_two_relays() {
                 assert_eq!(conn.read(Duration::from_secs(5)), Some((channel, wire::RESIZE, vec![80, 0, 24, 0])));
             }
         }
+    }
+}
+
+#[test]
+fn interactive_grid_negotiation_falls_back_if_either_hop_is_pre_fix() {
+    let Some(old) = std::env::var_os("HC_PRE_GRID_BIN") else {
+        eprintln!("skipped: set HC_PRE_GRID_BIN to the pre-fix core");
+        return;
+    };
+    for old_owner in [true, false] {
+        let mut owner = Session::new();
+        let mut client = Session::new();
+        let legacy = if old_owner { &mut owner } else { &mut client };
+        let bin = legacy.root.join("bin/herdr-core");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::copy(&old, &bin).unwrap();
+        legacy.bin = bin;
+        let t = run(&owner, &["sleep", "100"]);
+        client.env.push(fake_ssh(&client, &[("owner", &owner)]));
+        client.json(&["machine", "add", "owner"]);
+        let mut conn = Framed::open(&client);
+        let reply = conn.call(
+            "terminal.attach",
+            json!({"terminal": format!("owner/{t}"), "cols": 80, "rows": 24, "resize_notifications": true}),
+        );
+        assert_eq!(reply["result"]["resize_notifications"], false, "legacy owner={old_owner}: {reply}");
     }
 }

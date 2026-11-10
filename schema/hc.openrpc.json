@@ -14,7 +14,7 @@
             "type": "integer"
           },
           "resize_notifications": {
-            "description": "True only when the entire path sends RESIZE before replacement paints.\nFalse or absent means the observer must track size changes separately.",
+            "description": "True only when the entire path sends RESIZE before replacement paints.\nFalse or absent means the viewer must track size changes separately.",
             "type": "boolean"
           },
           "terminal": {
@@ -2347,12 +2347,12 @@
           }
         },
         {
-          "description": "Observer understands core-to-viewer RESIZE before replacement paints.",
+          "description": "Viewer understands core-to-viewer RESIZE before replacement paints.",
           "name": "resize_notifications",
           "required": false,
           "schema": {
             "default": false,
-            "description": "Observer understands core-to-viewer RESIZE before replacement paints.",
+            "description": "Viewer understands core-to-viewer RESIZE before replacement paints.",
             "type": "boolean"
           }
         },

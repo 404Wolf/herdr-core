@@ -101,6 +101,9 @@ impl Viewer {
             return;
         }
         match kind {
+            wire::RESIZE if payload.len() == 4 => self
+                .screen
+                .resize(u16::from_le_bytes([payload[0], payload[1]]), u16::from_le_bytes([payload[2], payload[3]])),
             wire::DATA => {
                 self.screen.write(&payload);
                 self.received += payload.len();

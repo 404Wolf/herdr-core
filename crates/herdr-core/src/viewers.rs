@@ -100,7 +100,7 @@ impl Core {
             conn: conn.clone(),
             channel,
             observe: req.observe,
-            resize_notifications: req.observe && req.resize_notifications,
+            resize_notifications: req.resize_notifications,
             repaint_pending: false,
             size: req.size,
             active_at: (!req.resumed).then(Instant::now),
@@ -114,7 +114,7 @@ impl Core {
         st.viewers.get_mut(&id).unwrap().last_mut().unwrap().repaint_pending = false;
         conn.with(|out| {
             out.open_paused(channel);
-            if req.observe && req.resize_notifications {
+            if req.resize_notifications {
                 let t = &st.reg.terminals[&id];
                 let size = [t.cols.to_le_bytes(), t.rows.to_le_bytes()].concat();
                 out.resize(channel, &size);
@@ -174,7 +174,8 @@ impl Core {
             if v.repaint_pending {
                 continue;
             }
-            let taller = !v.observe && v.sized && v.desktop_group.is_some() && v.size.1 > rows;
+            let taller =
+                !v.resize_notifications && !v.observe && v.sized && v.desktop_group.is_some() && v.size.1 > rows;
             let bytes = if v.recovering {
                 let Some(paint) = &recovered else { continue };
                 v.recovering = false;
@@ -297,7 +298,7 @@ impl Core {
         self.touch(&mut st, conn, channel, |v| {
             v.size = (cols, rows);
             v.sized = true;
-            v.repaint_pending |= !v.observe && v.desktop_group.is_some();
+            v.repaint_pending |= !v.resize_notifications && !v.observe && v.desktop_group.is_some();
         });
         conn.wake.notify_one();
     }

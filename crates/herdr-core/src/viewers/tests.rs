@@ -114,9 +114,59 @@ fn drain(conn: &Arc<Conn>, channel: u32, screen: &mut ghostty_vt::Terminal) {
         while let Some(frame) = out.next_frame() {
             if frame[4] == wire::DATA {
                 screen.write(&frame[wire::HEADER..]);
+            } else if frame[4] == wire::RESIZE {
+                let size = &frame[wire::HEADER..];
+                screen.resize(u16::from_le_bytes([size[0], size[1]]), u16::from_le_bytes([size[2], size[3]]));
             }
         }
     });
+}
+
+#[test]
+fn wider_desktop_viewer_wraps_inline_redraw_at_the_shared_width() {
+    let (core, id, root) = core_with_screen(20, 8);
+    let wide = desktop_conn();
+    let narrow = desktop_conn();
+    let request = |size| AttachRequest {
+        observe: false,
+        resize_notifications: true,
+        history: 0,
+        size,
+        display: Display::default(),
+        resumed: false,
+        desktop_group: Some(("forwarded-line".into(), "desktop".into())),
+    };
+    let a = core.attach(&wide, id, request((40, 8))).unwrap();
+    core.viewer_resize(&wide, a, 40, 8);
+    let b = core.attach(&narrow, id, request((20, 8))).unwrap();
+    core.viewer_resize(&narrow, b, 20, 8);
+    wide.with(|out| out.resume(a));
+    narrow.with(|out| out.resume(b));
+    let mut wide_screen = ghostty_vt::Terminal::new(40, 8, 1 << 20);
+    let mut narrow_screen = ghostty_vt::Terminal::new(20, 8, 1 << 20);
+    core.prepare_repaints(&wide);
+    core.prepare_repaints(&narrow);
+    drain(&wide, a, &mut wide_screen);
+    drain(&narrow, b, &mut narrow_screen);
+    for bytes in [
+        b"| markdown table row | result |\r\n\r\n> prompt\r\nINSERT bypass".as_slice(),
+        b"\x1b[2A\r\x1b[J> next prompt\r\nINSERT bypass",
+    ] {
+        core.output(&mut core.lock(), id, bytes);
+        core.prepare_repaints(&wide);
+        core.prepare_repaints(&narrow);
+        drain(&wide, a, &mut wide_screen);
+        drain(&narrow, b, &mut narrow_screen);
+        let expected = core.lock().screens[&id].screen_rows();
+        assert_eq!(narrow_screen.screen_rows(), expected);
+        assert_eq!(
+            wide_screen.screen_rows().iter().map(|r| r.trim_end()).collect::<Vec<_>>(),
+            expected.iter().map(|r| r.trim_end()).collect::<Vec<_>>(),
+            "inline cursor-up redraw must use the PTY's wrap width"
+        );
+    }
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

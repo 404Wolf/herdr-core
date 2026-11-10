@@ -441,7 +441,7 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
     Ok(AttachResult {
         channel,
         terminal: Public(record(core, id)?),
-        resize_notifications: p.observe && p.resize_notifications,
+        resize_notifications: p.resize_notifications,
         automatic_input: true,
     })
 }

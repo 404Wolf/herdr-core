@@ -139,7 +139,13 @@ The core hosting the terminal applies its `size_policy` setting.
 Taller desktop panes get a cleared replacement paint when the grid or pane
 changes size. Their scrolling region stays within the shared grid; `CSI r` and `RIS`
 resets are bounded too, so old rows do not remain below an inline TUI.
-This uses terminal bytes; the app does not need resize-frame support.
+Legacy apps use terminal bytes for the taller-pane repair. Viewers opting into
+`terminal.attach`'s `resize_notifications` get ordered core-to-viewer RESIZE
+frames before replacement paints, including their initial grid. This works for
+interactive viewers too: render those rows and columns, but keep reporting the
+pane's available geometry separately. The reply confirms support across the
+whole path; false or absent retains legacy sizing. A reconnect that loses
+negotiated support ends the stream rather than sending an incompatible paint.
 Observers never control size, and a viewer returning after a dropped line
 does not constrain the desktop until active again. Attach placeholders are
 ignored until a window reports geometry. Sized desktop viewers keep their

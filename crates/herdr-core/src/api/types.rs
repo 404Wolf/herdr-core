@@ -381,7 +381,7 @@ pub struct AttachParams {
     #[arg(long)]
     #[serde(default)]
     pub observe: bool,
-    /// Observer understands core-to-viewer RESIZE before replacement paints.
+    /// Viewer understands core-to-viewer RESIZE before replacement paints.
     #[arg(skip)]
     #[serde(default)]
     pub resize_notifications: bool,
@@ -419,7 +419,7 @@ pub struct AttachResult {
     pub channel: u32,
     pub terminal: Public,
     /// True only when the entire path sends RESIZE before replacement paints.
-    /// False or absent means the observer must track size changes separately.
+    /// False or absent means the viewer must track size changes separately.
     pub resize_notifications: bool,
     /// The entire attach path accepts AUTOMATIC_INPUT (kind 6). Absent means use DATA.
     pub automatic_input: bool,

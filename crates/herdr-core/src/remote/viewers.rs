@@ -96,9 +96,7 @@ pub async fn attach(core: &Core, conn: &Arc<Conn>, m: &Machine, mut params: Valu
     {
         Ok(mut r) => {
             let there = r["channel"].as_u64().unwrap_or_default() as u32;
-            let enabled = params["observe"] == true
-                && params["resize_notifications"] == true
-                && r["resize_notifications"] == true;
+            let enabled = params["resize_notifications"] == true && r["resize_notifications"] == true;
             r["resize_notifications"] = enabled.into();
             params["resize_notifications"] = enabled.into();
             let automatic_input = automatic_input(&line, &r);
