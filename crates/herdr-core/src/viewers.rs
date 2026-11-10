@@ -39,6 +39,8 @@ pub struct Viewer {
     active_at: Option<Instant>,
     /// Desktop apps attach hidden tabs with a placeholder before reporting geometry.
     sized: bool,
+    /// A relayed reconnect carries cached geometry, not a new physical offer.
+    awaiting_size: bool,
     /// The source line's machine and the desktop identity carried on that line.
     desktop_group: Option<(String, String)>,
     display: Display,
@@ -105,6 +107,7 @@ impl Core {
             size: req.size,
             active_at: (!req.resumed).then(Instant::now),
             sized: false,
+            awaiting_size: req.resumed,
             desktop_group: req.desktop_group,
             display: req.display,
             recovering,
@@ -298,6 +301,9 @@ impl Core {
         self.touch(&mut st, conn, channel, |v| {
             v.size = (cols, rows);
             v.sized = true;
+            if cols > 0 && rows > 0 {
+                v.awaiting_size = false;
+            }
             v.repaint_pending |= !v.resize_notifications && !v.observe && v.desktop_group.is_some();
         });
         conn.wake.notify_one();
@@ -361,6 +367,11 @@ impl Core {
             st.viewers.get(&id).map_or(&[], Vec::as_slice),
             self.settings().size_policy == crate::config::SizePolicy::Grouped,
         );
+        // Keep the holder's inherited grid while legacy relays resume. Focus,
+        // input and hidden attach placeholders cannot replace a physical offer.
+        if leader.is_none() && st.viewers.get(&id).is_some_and(|vs| vs.iter().any(|v| !v.observe)) {
+            return;
+        }
         let (cols, rows) = size.unwrap_or_else(|| self.headless());
         let display = leader.map(|v| v.display.clone());
         if !st.screens.contains_key(&id) {
@@ -437,7 +448,11 @@ impl Core {
 }
 
 fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u16, u16)>) {
-    let leader = viewers.iter().filter(|v| !v.observe).max_by_key(|v| v.active_at);
+    let awaiting_size = viewers.iter().any(|v| !v.observe && v.awaiting_size);
+    let leader = viewers
+        .iter()
+        .filter(|v| !v.observe && !v.awaiting_size && (!awaiting_size || v.sized))
+        .max_by_key(|v| v.active_at);
     let Some(leader) = leader else { return (None, None) };
     let size = if grouped && leader.desktop_group.is_some() {
         viewers

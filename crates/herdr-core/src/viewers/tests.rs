@@ -22,6 +22,7 @@ fn viewer(conn: &Arc<Conn>, size: (u16, u16), active_at: Option<Instant>) -> Vie
         size,
         active_at,
         sized: true,
+        awaiting_size: false,
         desktop_group: conn.local_desktop.then(|| ("local".into(), "desktop".into())),
         display: Display::default(),
         recovering: false,
@@ -106,6 +107,49 @@ fn core_with_screen(cols: u16, rows: u16) -> (Arc<Core>, u32, std::path::PathBuf
         id
     };
     (core, id, root)
+}
+
+#[test]
+fn resumed_viewers_hold_the_inherited_grid_until_a_physical_size_arrives() {
+    for notifications in [false, true] {
+        let (core, id, root) = core_with_screen(103, 74);
+        let narrow = desktop_conn();
+        let wide = desktop_conn();
+        let placeholder = desktop_conn();
+        let observer = desktop_conn();
+        let request = |size, resumed, observe| AttachRequest {
+            observe,
+            resize_notifications: notifications,
+            history: 0,
+            size,
+            display: Display::default(),
+            resumed,
+            desktop_group: Some(("line".into(), "desktop".into())),
+        };
+        let grid = || core.lock().screens[&id].size();
+        let a = core.attach(&narrow, id, request((103, 74), true, false)).unwrap();
+        let b = core.attach(&wide, id, request((246, 91), true, false)).unwrap();
+        assert_eq!(grid(), (103, 74), "all resumed streams must retain the inherited grid");
+        core.viewer_focus(&wide, b, true);
+        core.viewer_input(&wide, b, b"", false);
+        assert_eq!(grid(), (103, 74), "focus and input are not physical geometry");
+        core.attach(&placeholder, id, request((10, 3), false, false)).unwrap();
+        let observed = core.attach(&observer, id, request((20, 5), false, true)).unwrap();
+        core.viewer_resize(&observer, observed, 20, 5);
+        core.viewer_resize(&wide, b, 0, 0);
+        assert_eq!(grid(), (103, 74), "placeholders, observers and zero sizes must not release the hold");
+        core.viewer_resize(&wide, b, 246, 91);
+        assert_eq!(grid(), (246, 91), "a fresh physical offer releases the provisional hold");
+        core.viewer_focus(&narrow, a, true);
+        core.viewer_input(&narrow, a, b"", false);
+        assert_eq!(grid(), (246, 91), "a still-unmeasured resumed stream must not take sizing back");
+        core.viewer_resize(&narrow, a, 120, 50);
+        assert_eq!(grid(), (120, 50), "new physical offers again constrain both axes");
+        core.viewer_focus(&wide, b, true);
+        assert_eq!(grid(), (120, 50), "focus must not cause a resize tug-of-war");
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn drain(conn: &Arc<Conn>, channel: u32, screen: &mut ghostty_vt::Terminal) {
