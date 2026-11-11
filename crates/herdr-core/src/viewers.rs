@@ -490,11 +490,30 @@ impl Core {
     }
 }
 
+fn desktop_sizer(v: &Viewer) -> bool {
+    !v.observe
+        && v.size_eligible
+        && v.desktop_group.is_some()
+        && v.sized
+        && !v.awaiting_size
+        && v.size.0 > 0
+        && v.size.1 > 0
+}
+
 fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u16, u16)>) {
     let awaiting_size = viewers.iter().any(|v| !v.observe && v.size_eligible && v.awaiting_size);
+    // A measured visible desktop owns the sizing device. Phone and legacy
+    // viewers are fallback leaders only until such a desktop is available.
+    let desktop_available = viewers.iter().any(desktop_sizer);
     let leader = viewers
         .iter()
-        .filter(|v| !v.observe && v.size_eligible && !v.awaiting_size && (!awaiting_size || v.sized))
+        .filter(|v| {
+            !v.observe
+                && v.size_eligible
+                && !v.awaiting_size
+                && (!awaiting_size || v.sized)
+                && if desktop_available { desktop_sizer(v) } else { v.desktop_group.is_none() }
+        })
         .max_by_key(|v| v.active_at);
     let Some(leader) = leader else { return (None, None) };
     let size = if grouped && leader.desktop_group.is_some() {
@@ -505,6 +524,7 @@ fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u
                     && v.desktop_group == leader.desktop_group
                     && v.size_eligible
                     && v.sized
+                    && !v.awaiting_size
                     && v.size.0 > 0
                     && v.size.1 > 0
                     && v.active_at.is_some()

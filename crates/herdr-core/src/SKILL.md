@@ -128,9 +128,13 @@ still resize the terminal normally. `display: {fg, bg, cursor, cell}` (as in
 from its start, before any viewer attaches.
 
 On Linux, local Herdr app windows share the smallest reported columns and
-rows while the desktop is active. Focus between those windows keeps that
-grid; colors and cell facts still follow the latest active viewer. A phone,
-SSH client, or other viewer takes size control when active, as before.
+rows while the desktop is active. A visible, measured desktop pane owns sizing
+before phones, SSH clients or other secondary viewers, regardless of which was
+most recently active. With grouped sizing, visible panes in the selected
+desktop group share the smaller grid. `size_policy = "latest"` selects the
+latest active desktop pane instead; secondary viewers control size only when no
+eligible desktop pane remains. Focus between desktop panes keeps the shared
+grid; colors and cell facts still follow the latest active viewer.
 The same desktop group is forwarded when attaching to another machine;
 both cores must have this support. `terminal.attach`'s `desktop_group` is
 core-to-core metadata: ordinary clients cannot claim a group. Forwarded
@@ -155,11 +159,12 @@ The reply confirms the feature only when every relay hop supports it. Such apps
 send kind-7 VISIBILITY on compositor-visible active-workspace changes, separate
 from focus. Hidden views do not constrain the grouped grid. A hidden resumed
 view stays pending until it is shown and reports a positive physical RESIZE.
-Without negotiated support, clients stay visible/eligible as before. Other
-operating systems retain latest-active sizing for local viewers, but accept
-forwarded desktop groups. Set
-`size_policy = "latest"` in `~/.config/herdr-core/config.toml` to restore
-latest-active sizing on Linux too (default: `"grouped"`). No restart needed;
+Without negotiated support, clients stay visible/eligible as before. The
+hosting core applies its `size_policy` to choose group-fit versus latest
+desktop sizing; secondary viewers remain fallback-only. Set
+`size_policy = "latest"` in `~/.config/herdr-core/config.toml` to use the
+latest active desktop pane instead of fitting the group (default: `"grouped"`).
+Secondary viewers remain fallback-only. No restart needed;
 the setting applies on the next viewer activity, visibility change or detach.
 
 ```sh

@@ -72,9 +72,15 @@ fn phones_observers_resumed_and_placeholder_viewers_do_not_pin_desktop_size() {
     vs[0].active_at = Some(now + std::time::Duration::from_secs(1));
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)));
     vs[1].active_at = Some(now + std::time::Duration::from_secs(2));
-    assert_eq!(viewer_size(&vs, true).1, Some((40, 10)), "phone activity still takes over");
+    assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "phone activity cannot displace a visible desktop");
+    assert_eq!(viewer_size(&vs, false).1, Some((100, 30)), "latest policy still prefers an eligible desktop");
     vs[1].observe = true;
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)));
+    vs[0].size_eligible = false;
+    vs[1].observe = false;
+    assert_eq!(viewer_size(&vs, true).1, Some((40, 10)), "hiding the last desktop restores mobile fallback");
+    assert_eq!(viewer_size(&vs, false).1, Some((40, 10)));
+    vs[0].size_eligible = true;
     vs[1] = viewer(&desktop, (40, 10), None);
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "reconnect is not activity");
     vs[1].active_at = Some(now);
@@ -87,6 +93,26 @@ fn phones_observers_resumed_and_placeholder_viewers_do_not_pin_desktop_size() {
     vs[1].active_at = Some(now);
     vs[1].size = (0, 0);
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "zero size does not constrain");
+}
+
+#[test]
+fn mobile_only_and_desktop_pending_fallbacks_remain_authoritative() {
+    let now = Instant::now();
+    let phone = Arc::new(Conn::default());
+    let mut mobile_only = vec![viewer(&phone, (40, 10), Some(now))];
+    assert_eq!(viewer_size(&mobile_only, true).1, Some((40, 10)), "mobile-only sizing remains available");
+    assert_eq!(viewer_size(&mobile_only, false).1, Some((40, 10)));
+
+    let desktop = desktop_conn();
+    mobile_only.push(viewer(&desktop, (218, 74), Some(now + std::time::Duration::from_secs(1))));
+    mobile_only[1].sized = false;
+    mobile_only[1].awaiting_size = true;
+    assert_eq!(viewer_size(&mobile_only, true).1, Some((40, 10)), "a pending desktop cannot lead before measurement");
+    assert_eq!(viewer_size(&mobile_only, false).1, Some((40, 10)));
+
+    mobile_only[1].awaiting_size = false;
+    mobile_only[1].size_eligible = false;
+    assert_eq!(viewer_size(&mobile_only, true).1, Some((40, 10)), "a hidden desktop cannot lead");
 }
 
 #[test]
