@@ -296,6 +296,12 @@ pub struct TerminalParams {
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct ViewerListParams {
+    /// A local terminal: `t7` or its local name. This query never fans out to peers.
+    pub terminal: String,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ListParams {
     /// Include finished terminals.
     #[arg(long)]

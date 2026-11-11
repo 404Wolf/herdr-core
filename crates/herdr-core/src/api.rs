@@ -78,6 +78,9 @@ methods! { Ctx<'_>;
     "terminal.get" => terminal_get, TerminalParams => Public,
         "One terminal's facts, live or finished.",
         errors ["not_found", "machine_unknown"];
+    "terminal.viewers" => terminal_viewers, ViewerListParams => crate::viewers::ViewerListResult,
+        "Read-only local snapshot of attached viewers and the active sizing selector; never queries peers.",
+        errors ["not_found", "machine_unknown"];
     "terminal.kill" => terminal_kill, TerminalParams => Public,
         "End the program: hangup, then terminate, then kill. Returns the observed result.",
         errors ["not_found", "machine_unknown"];
@@ -285,6 +288,12 @@ async fn terminal_get(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcErr
     let result = record(core, id).map(Public);
     core.flush_saved().await?;
     result
+}
+
+async fn terminal_viewers(core: Ctx<'_>, p: ViewerListParams) -> Result<crate::viewers::ViewerListResult, RpcError> {
+    let id = resolve(core, &p.terminal)?;
+    record(core, id)?;
+    Ok(core.viewer_list(id, crate::terminals::address(id)))
 }
 
 async fn terminal_kill(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcError> {

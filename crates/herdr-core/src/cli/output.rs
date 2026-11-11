@@ -231,6 +231,78 @@ pub(super) fn table(r: &Value) -> String {
     out
 }
 
+/// Attached views on one local terminal and the exact current sizing decision.
+pub(super) fn viewers(r: &Value) -> String {
+    let grid =
+        |value: &Value| format!("{}x{}", value["cols"].as_u64().unwrap_or(0), value["rows"].as_u64().unwrap_or(0));
+    let leader = r["leader"].as_object().map_or_else(
+        || "none".into(),
+        |id| format!("c{}/ch{}", id["connection_id"].as_u64().unwrap_or(0), id["channel"].as_u64().unwrap_or(0)),
+    );
+    let selected = r["selected_grid"].as_object().map_or_else(|| "held".into(), |_| grid(&r["selected_grid"]));
+    let mut lines = vec![format!(
+        "{}  PTY {}  selected {}  leader {}",
+        r["terminal"].as_str().unwrap_or("?"),
+        grid(&r["current_grid"]),
+        selected,
+        leader
+    )];
+    let entries = r["viewers"].as_array().map(Vec::as_slice).unwrap_or_default();
+    if entries.is_empty() {
+        lines.push("no attached viewers".into());
+    }
+    for v in entries {
+        let id = &v["identity"];
+        let connection = id["connection_id"].as_u64().unwrap_or(0);
+        let channel = id["channel"].as_u64().unwrap_or(0);
+        let origin = match v["origin"].as_str().unwrap_or("local_client") {
+            "local_desktop" => "local desktop".to_owned(),
+            "relayed" => format!("relayed via {}", v["peer"].as_str().unwrap_or("?")),
+            _ => "local client".to_owned(),
+        };
+        let pid = v["peer_pid"].as_u64().map(|pid| format!(" pid={pid}")).unwrap_or_default();
+        let visibility = if v["visible"] == true { "visible" } else { "hidden" };
+        let eligibility = if v["size_eligible"] == true { "eligible" } else { "excluded" };
+        let capabilities =
+            format!("vis={} resize={}", v["visibility_updates"] == true, v["resize_notifications"] == true);
+        let state = if v["awaiting_size"] == true {
+            "awaiting-size"
+        } else if v["sized"] == true {
+            "sized"
+        } else {
+            "unsized"
+        };
+        let mut roles = Vec::new();
+        if v["observe"] == true {
+            roles.push("observe");
+        }
+        if v["leader"] == true {
+            roles.push("leader");
+        }
+        if v["contributes_to_grid"] == true && v["leader"] != true {
+            roles.push("group-min");
+        }
+        let group = v["desktop_group"].as_object().map_or_else(String::new, |g| {
+            format!(" group={}/{}", g["line"].as_str().unwrap_or("?"), g["group"].as_str().unwrap_or("?"))
+        });
+        let activity = v["active_ms_ago"].as_u64().map_or_else(|| "inactive".into(), |ms| format!("active {ms}ms ago"));
+        lines.push(format!(
+            "c{connection}/ch{channel}  {}{}  {} {} {}  offer={}  {}  {}{}{}",
+            origin,
+            pid,
+            visibility,
+            eligibility,
+            state,
+            grid(&v["offered"]),
+            capabilities,
+            activity,
+            group,
+            if roles.is_empty() { String::new() } else { format!("  [{}]", roles.join(",")) }
+        ));
+    }
+    lines.join("\n")
+}
+
 /// How a machine's line is: "connected", "unreachable since 14:02 (why)", ...
 pub(super) fn line_state(m: &Value) -> String {
     let since = m["since_ms"].as_u64().map(|ms| {
@@ -279,6 +351,38 @@ pub(super) fn describe(t: &Value) -> String {
         description.push_str(&format!("\n  first message NOT sent: {}", first["reason"].as_str().unwrap_or("?")));
     }
     description
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewers_output_reports_both_negotiated_capabilities() {
+        let output = viewers(&serde_json::json!({
+            "terminal":"t1",
+            "current_grid":{"cols":80,"rows":24},
+            "selected_grid":{"cols":80,"rows":24},
+            "leader":{"connection_id":3,"channel":1},
+            "viewers":[{
+                "identity":{"connection_id":3,"channel":1},
+                "origin":"local_desktop",
+                "peer_pid":42,
+                "visible":true,
+                "size_eligible":true,
+                "sized":true,
+                "awaiting_size":false,
+                "visibility_updates":true,
+                "resize_notifications":true,
+                "offered":{"cols":80,"rows":24},
+                "active_ms_ago":1,
+                "leader":true,
+                "contributes_to_grid":true
+            }]
+        }));
+        assert!(output.contains("vis=true resize=true"));
+        assert!(output.contains("c3/ch1  local desktop pid=42"));
+    }
 }
 
 /// An exec's output as the program wrote it, then its exit code as ours.

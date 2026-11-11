@@ -187,6 +187,7 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
     }
     let mut conn = Conn::default();
     conn.local_desktop = local_desktop;
+    conn.peer_pid = platform::local_peer_pid(read.get_ref());
     let conn = Arc::new(conn);
     let mut writer = tokio::spawn(write_frames(core.clone(), conn.clone(), write));
     // Another core dialing in says who it is in its hello.

@@ -21,10 +21,12 @@ fn viewer(conn: &Arc<Conn>, size: (u16, u16), active_at: Option<Instant>) -> Vie
         repaint_pending: false,
         size,
         active_at,
-        size_eligible: true,
+        visible: true,
         sized: true,
         awaiting_size: false,
         visibility_updates: true,
+        origin: if conn.local_desktop { ViewerOrigin::LocalDesktop } else { ViewerOrigin::LocalClient },
+        peer: None,
         desktop_group: conn.local_desktop.then(|| ("local".into(), "desktop".into())),
         display: Display::default(),
         recovering: false,
@@ -32,12 +34,13 @@ fn viewer(conn: &Arc<Conn>, size: (u16, u16), active_at: Option<Instant>) -> Vie
 }
 
 #[test]
-fn desktop_windows_fit_both_axes_without_focus_reflow_and_keep_latest_display() {
+fn desktop_windows_fit_both_axes_and_use_the_selected_leader_display() {
     let now = Instant::now();
     let a = desktop_conn();
     let b = desktop_conn();
     let mut vs = vec![viewer(&a, (100, 20), Some(now)), viewer(&b, (80, 30), Some(now))];
     vs[0].display.bg = Some("#ffffff".into());
+    vs[1].display.bg = Some("#eeeeee".into());
     vs[0].active_at = Some(now + std::time::Duration::from_secs(1));
     let (leader, size) = viewer_size(&vs, true);
     assert_eq!(size, Some((80, 20)));
@@ -45,6 +48,15 @@ fn desktop_windows_fit_both_axes_without_focus_reflow_and_keep_latest_display() 
     vs[1].active_at = Some(now + std::time::Duration::from_secs(2));
     assert_eq!(viewer_size(&vs, true).1, Some((80, 20)));
     assert_eq!(viewer_size(&vs, false).1, Some((80, 30)), "latest policy remains available");
+    let phone = Arc::new(Conn::default());
+    let mut mobile = viewer(&phone, (40, 10), Some(now + std::time::Duration::from_secs(3)));
+    mobile.display.bg = Some("#000000".into());
+    vs.push(mobile);
+    let (leader, size) = viewer_size(&vs, true);
+    assert_eq!(size, Some((80, 20)), "phone activity cannot override visible desktop sizing");
+    assert_eq!(leader.unwrap().display.bg.as_deref(), Some("#eeeeee"), "display facts follow selected desktop leader");
+    vs.pop();
+    assert_eq!(viewer_size(&vs, true).1, Some((80, 20)));
     vs.pop();
     assert_eq!(viewer_size(&vs, true).1, Some((100, 20)), "detach releases the constraint");
 }
@@ -76,11 +88,11 @@ fn phones_observers_resumed_and_placeholder_viewers_do_not_pin_desktop_size() {
     assert_eq!(viewer_size(&vs, false).1, Some((100, 30)), "latest policy still prefers an eligible desktop");
     vs[1].observe = true;
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)));
-    vs[0].size_eligible = false;
+    vs[0].visible = false;
     vs[1].observe = false;
     assert_eq!(viewer_size(&vs, true).1, Some((40, 10)), "hiding the last desktop restores mobile fallback");
     assert_eq!(viewer_size(&vs, false).1, Some((40, 10)));
-    vs[0].size_eligible = true;
+    vs[0].visible = true;
     vs[1] = viewer(&desktop, (40, 10), None);
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "reconnect is not activity");
     vs[1].active_at = Some(now);
@@ -111,7 +123,7 @@ fn mobile_only_and_desktop_pending_fallbacks_remain_authoritative() {
     assert_eq!(viewer_size(&mobile_only, false).1, Some((40, 10)));
 
     mobile_only[1].awaiting_size = false;
-    mobile_only[1].size_eligible = false;
+    mobile_only[1].visible = false;
     assert_eq!(viewer_size(&mobile_only, true).1, Some((40, 10)), "a hidden desktop cannot lead");
 }
 
@@ -122,13 +134,13 @@ fn grouped_size_uses_visible_min_and_visibility_restores_the_grid() {
     let landscape = desktop_conn();
     let mut vs = vec![viewer(&portrait, (218, 168), Some(now)), viewer(&landscape, (218, 74), Some(now))];
 
-    vs[1].size_eligible = false;
+    vs[1].visible = false;
     assert_eq!(viewer_size(&vs, true).1, Some((218, 168)), "off-workspace view is excluded");
 
-    vs[1].size_eligible = true;
+    vs[1].visible = true;
     assert_eq!(viewer_size(&vs, true).1, Some((218, 74)), "visible view constrains both axes");
 
-    vs[1].size_eligible = false;
+    vs[1].visible = false;
     assert_eq!(viewer_size(&vs, true).1, Some((218, 168)), "hiding restores the larger grid");
 }
 
@@ -139,12 +151,12 @@ fn focus_and_idle_do_not_change_visibility_eligibility() {
     let small = desktop_conn();
     let mut vs = vec![viewer(&large, (218, 168), Some(now)), viewer(&small, (218, 74), Some(now))];
     vs[1].active_at = Some(now - std::time::Duration::from_secs(3600));
-    assert!(vs[1].size_eligible);
+    assert!(vs[1].visible);
     assert_eq!(viewer_size(&vs, true).1, Some((218, 74)), "an idle visible view still constrains");
 
     vs[1].active_at = None;
     assert_eq!(viewer_size(&vs, true).1, Some((218, 168)), "a returning viewer without a fresh size cannot constrain");
-    vs[1].size_eligible = true;
+    vs[1].visible = true;
     vs[1].active_at = Some(now - std::time::Duration::from_secs(3600));
     assert_eq!(viewer_size(&vs, true).1, Some((218, 74)), "visibility, not recency, admits the measured size");
 }
@@ -242,6 +254,17 @@ fn visibility_updates_recompute_the_grid_and_resumed_views_wait_for_measurement(
     assert_eq!(grid(), (218, 168), "hidden resumed placeholder neither leads nor blocks");
     core.viewer_visibility(&landscape, l, true);
     assert_eq!(grid(), (218, 168), "showing an unmeasured resumed view holds the inherited grid");
+    let pending = core.viewer_list(id, "t1".into());
+    let pending = pending
+        .viewers
+        .iter()
+        .find(|viewer| viewer.identity == (ViewerIdentity { connection_id: landscape.id, channel: l }))
+        .unwrap();
+    assert!(pending.visible);
+    assert!(!pending.size_eligible);
+    assert!(pending.awaiting_size);
+    assert!(!pending.sized);
+    assert!(!pending.leader);
     core.viewer_focus(&landscape, l, false);
     core.viewer_input(&landscape, l, b"", false);
     core.viewer_resize(&landscape, l, 0, 0);
@@ -249,6 +272,14 @@ fn visibility_updates_recompute_the_grid_and_resumed_views_wait_for_measurement(
 
     core.viewer_resize(&landscape, l, 218, 74);
     assert_eq!(grid(), (218, 74), "first positive physical measurement releases the hold");
+    let measured = core.viewer_list(id, "t1".into());
+    let measured = measured
+        .viewers
+        .iter()
+        .find(|viewer| viewer.identity == (ViewerIdentity { connection_id: landscape.id, channel: l }))
+        .unwrap();
+    assert!(measured.size_eligible && measured.leader && measured.contributes_to_grid);
+    assert!(!measured.awaiting_size);
     core.viewer_visibility(&landscape, l, false);
     assert_eq!(grid(), (218, 168), "hiding the smaller view restores the larger grid");
     core.viewer_focus(&landscape, l, true);
@@ -259,6 +290,158 @@ fn visibility_updates_recompute_the_grid_and_resumed_views_wait_for_measurement(
     assert_eq!(grid(), (218, 74), "showing a measured view restores its constraint");
     core.viewer_focus(&landscape, l, false);
     assert_eq!(grid(), (218, 74), "focus loss does not hide a visible constraint");
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn viewer_diagnostics_track_visibility_group_min_and_disconnect() {
+    let (core, id, root) = core_with_screen(100, 40);
+    let wide = desktop_conn();
+    let narrow = desktop_conn();
+    let phone = Arc::new(Conn::default());
+    let request = |size, desktop_group, visibility_updates| AttachRequest {
+        observe: false,
+        resize_notifications: true,
+        visible: true,
+        visibility_updates,
+        history: 0,
+        size,
+        display: Display::default(),
+        resumed: false,
+        desktop_group,
+    };
+    let a = core.attach(&wide, id, request((100, 40), Some(("local".into(), "desktop".into())), true)).unwrap();
+    core.viewer_resize(&wide, a, 100, 40);
+    let b = core.attach(&narrow, id, request((80, 30), Some(("local".into(), "desktop".into())), true)).unwrap();
+    core.viewer_resize(&narrow, b, 80, 30);
+    let mobile = core.attach(&phone, id, request((40, 10), None, false)).unwrap();
+    core.viewer_resize(&phone, mobile, 40, 10);
+    let grid = || core.lock().screens[&id].size();
+    assert_eq!(grid(), (80, 30));
+
+    let snapshot = core.viewer_list(id, "t1".into());
+    assert_eq!(snapshot.current_grid, GridSize { cols: 80, rows: 30 });
+    assert_eq!(snapshot.selected_grid, Some(GridSize { cols: 80, rows: 30 }));
+    let a_identity = ViewerIdentity { connection_id: wide.id, channel: a };
+    let b_identity = ViewerIdentity { connection_id: narrow.id, channel: b };
+    let mobile_identity = ViewerIdentity { connection_id: phone.id, channel: mobile };
+    let a_info = snapshot.viewers.iter().find(|v| v.identity == a_identity).unwrap();
+    let b_info = snapshot.viewers.iter().find(|v| v.identity == b_identity).unwrap();
+    let mobile_info = snapshot.viewers.iter().find(|v| v.identity == mobile_identity).unwrap();
+    assert!(snapshot.leader == Some(b_info.identity));
+    assert!(a_info.size_eligible && a_info.contributes_to_grid);
+    assert!(b_info.size_eligible && b_info.leader && b_info.contributes_to_grid);
+    assert!(mobile_info.visible && !mobile_info.size_eligible && !mobile_info.contributes_to_grid);
+    assert_eq!(mobile_info.origin, ViewerOrigin::LocalClient);
+    assert!(!mobile_info.visibility_updates, "legacy peers do not negotiate visibility");
+    assert!(mobile_info.peer_pid.is_none(), "non-Unix or unavailable PID is omitted");
+    assert_eq!(
+        core.viewer_list(id, "t1".into()).viewers.iter().find(|v| v.identity == mobile_identity).unwrap().identity,
+        mobile_info.identity,
+        "identity stays stable while the connection lives"
+    );
+
+    core.viewer_visibility(&narrow, b, false);
+    assert_eq!(grid(), (100, 40), "hidden minimum no longer constrains the visible desktop");
+    let hidden = core.viewer_list(id, "t1".into());
+    let hidden_b = hidden.viewers.iter().find(|v| v.identity == b_identity).unwrap();
+    assert!(!hidden_b.visible && !hidden_b.size_eligible && !hidden_b.contributes_to_grid);
+    assert_eq!(hidden.selected_grid, Some(GridSize { cols: 100, rows: 40 }));
+
+    core.viewer_visibility(&wide, a, false);
+    assert_eq!(grid(), (40, 10), "with no visible desktop, mobile becomes fallback");
+    let no_desktop = core.viewer_list(id, "t1".into());
+    let phone_info = no_desktop.viewers.iter().find(|v| v.identity == mobile_identity).unwrap();
+    assert!(phone_info.size_eligible && phone_info.leader && phone_info.contributes_to_grid);
+    assert!(!no_desktop.viewers.iter().any(|v| v.identity == a_identity && v.leader));
+
+    core.viewer_visibility(&wide, a, true);
+    assert_eq!(grid(), (100, 40));
+    core.detach(&wide, None);
+    assert_eq!(grid(), (40, 10), "EOF detach removes the desktop offer and restores mobile sizing");
+    let detached = core.viewer_list(id, "t1".into());
+    assert!(!detached.viewers.iter().any(|v| v.identity == a_identity));
+    assert!(detached.viewers.iter().find(|v| v.identity == mobile_identity).unwrap().leader);
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_viewer_stays_visible_and_eligible_until_detach() {
+    let (core, id, root) = core_with_screen(100, 40);
+    let legacy = desktop_conn();
+    let channel = core
+        .attach(
+            &legacy,
+            id,
+            AttachRequest {
+                observe: false,
+                resize_notifications: false,
+                visible: true,
+                visibility_updates: false,
+                history: 0,
+                size: (100, 40),
+                display: Display::default(),
+                resumed: false,
+                desktop_group: Some(("local".into(), "desktop".into())),
+            },
+        )
+        .unwrap();
+    core.viewer_resize(&legacy, channel, 100, 40);
+    core.viewer_visibility(&legacy, channel, false);
+    core.viewer_focus(&legacy, channel, false);
+    let visible = core.viewer_list(id, "t1".into());
+    let legacy_view = visible.viewers.first().unwrap();
+    assert!(legacy_view.visible && legacy_view.size_eligible && legacy_view.leader);
+    assert!(!legacy_view.visibility_updates);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(core.viewer_list(id, "t1".into()).viewers[0].visible, "idle time never expires legacy offers");
+    core.detach(&legacy, None);
+    assert!(core.viewer_list(id, "t1".into()).viewers.is_empty());
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn relayed_viewer_origin_and_pid_mask_survive_peer_line_cleanup() {
+    let (core, id, root) = core_with_screen(80, 24);
+    let mut peer_conn = Conn::default();
+    peer_conn.peer_pid = Some(4242);
+    let peer_conn = Arc::new(peer_conn);
+    crate::remote::peer_joined(
+        &core,
+        &peer_conn,
+        &serde_json::json!({"core":{"id":"remote-id","name":"remote"},"calls_you":"test"}),
+    );
+    let channel = core
+        .attach(
+            &peer_conn,
+            id,
+            AttachRequest {
+                observe: false,
+                resize_notifications: true,
+                visible: true,
+                visibility_updates: true,
+                history: 0,
+                size: (80, 24),
+                display: Display::default(),
+                resumed: false,
+                desktop_group: Some(("remote-id".into(), "desktop".into())),
+            },
+        )
+        .unwrap();
+    crate::remote::peer_left(&core, &peer_conn);
+    let info = core
+        .viewer_list(id, "t1".into())
+        .viewers
+        .into_iter()
+        .find(|viewer| viewer.identity == (ViewerIdentity { connection_id: peer_conn.id, channel }))
+        .unwrap();
+    assert_eq!(info.origin, ViewerOrigin::Relayed);
+    assert_eq!(info.peer.as_deref(), Some("remote"));
+    assert_eq!(info.peer_pid, None, "a remote PID is never reported, even after peer-line cleanup");
+    assert!(info.resize_notifications);
     drop(core);
     std::fs::remove_dir_all(root).unwrap();
 }

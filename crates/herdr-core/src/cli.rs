@@ -2,7 +2,7 @@
 
 use crate::api::{
     AttachParams, ExecParams, InterruptParams, KeysParams, LabelParams, ListParams, PutParams, ReadParams, RunParams,
-    SendParams, SubscribeParams, TerminalParams, WaitParams,
+    SendParams, SubscribeParams, TerminalParams, ViewerListParams, WaitParams,
 };
 use crate::client;
 use crate::paths::Paths;
@@ -39,6 +39,8 @@ enum Cmd {
     Ls(ListParams),
     /// Show one terminal.
     Get(TerminalParams),
+    /// Show attached viewers and the local sizing decision for one terminal.
+    Viewers(ViewerListParams),
     /// End a terminal's program (hangup, then escalate).
     Kill(TerminalParams),
     /// Remove a finished terminal.
@@ -441,6 +443,11 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             (p.terminal, p.caller) = (pick(p.terminal)?, Some(caller()));
             let r = call("terminal.get", to(&p))?;
             let human = describe(&r);
+            Out { json: r, human }
+        }
+        Cmd::Viewers(p) => {
+            let r = call("terminal.viewers", to(&p))?;
+            let human = viewers(&r);
             Out { json: r, human }
         }
         Cmd::Kill(mut p) => {
@@ -853,6 +860,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("run", "terminal.run"),
     ("ls", "terminal.list"),
     ("get", "terminal.get"),
+    ("viewers", "terminal.viewers"),
     ("kill", "terminal.kill"),
     ("rm", "terminal.rm"),
     ("label", "terminal.label"),

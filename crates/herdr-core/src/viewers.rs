@@ -39,17 +39,97 @@ pub struct Viewer {
     active_at: Option<Instant>,
     /// Desktop apps attach hidden tabs with a placeholder before reporting geometry.
     sized: bool,
-    /// Whether this desktop view is currently eligible to constrain the PTY grid.
-    size_eligible: bool,
+    /// The effective compositor visibility. Old clients default to true.
+    visible: bool,
     /// A relayed reconnect carries cached geometry, not a new physical offer.
     awaiting_size: bool,
     /// The attach path negotiated the viewer-to-core VISIBILITY frame.
     visibility_updates: bool,
+    /// Origin is captured at attach so peer-line cleanup cannot relabel a viewer.
+    origin: ViewerOrigin,
+    peer: Option<String>,
     /// The source line's machine and the desktop identity carried on that line.
     desktop_group: Option<(String, String)>,
     display: Display,
     /// An unfinished sequence exceeded continuation tracking; skip its tail.
     pub(crate) recovering: bool,
+}
+
+fn viewer_origin(st: &State, conn: &Arc<Conn>) -> (ViewerOrigin, Option<String>) {
+    let key = crate::remote::conn_key(conn);
+    let peer_id = st.peer_lines.iter().find(|(_, (conn, _))| *conn == key).map(|(id, _)| id);
+    if let Some(id) = peer_id {
+        let peer = st.peers.get(id).map(|peer| peer.name.clone()).unwrap_or_else(|| id.clone());
+        (ViewerOrigin::Relayed, Some(peer))
+    } else if conn.local_desktop {
+        (ViewerOrigin::LocalDesktop, None)
+    } else {
+        (ViewerOrigin::LocalClient, None)
+    }
+}
+
+#[derive(Serialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewerIdentity {
+    /// Monotonic connection ID, unique for this core process lifetime.
+    pub connection_id: u64,
+    pub channel: u32,
+}
+
+#[derive(Serialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Serialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerOrigin {
+    LocalDesktop,
+    LocalClient,
+    Relayed,
+}
+
+#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct ViewerDesktopGroup {
+    pub line: String,
+    pub group: String,
+}
+
+#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct ViewerInfo {
+    pub identity: ViewerIdentity,
+    pub origin: ViewerOrigin,
+    /// Connected peer name for a relayed viewer; absent for local connections.
+    pub peer: Option<String>,
+    /// Same-uid local Unix socket peer PID (possibly an `hc connect` child, not its GPUI parent).
+    /// Never populated for relayed connections; unavailable credentials/PID are null.
+    pub peer_pid: Option<u32>,
+    pub offered: GridSize,
+    /// Effective visibility; legacy clients remain visible until detach.
+    pub visible: bool,
+    /// Candidate in the current sizing selector (can be false while visible).
+    pub size_eligible: bool,
+    pub visibility_updates: bool,
+    pub resize_notifications: bool,
+    pub observe: bool,
+    pub sized: bool,
+    pub awaiting_size: bool,
+    pub desktop_group: Option<ViewerDesktopGroup>,
+    /// Milliseconds since last focus/input/size/visibility activity.
+    pub active_ms_ago: Option<u64>,
+    pub leader: bool,
+    /// Included in the selected group's min-grid, or the selected fallback size.
+    pub contributes_to_grid: bool,
+}
+
+#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct ViewerListResult {
+    pub terminal: String,
+    pub current_grid: GridSize,
+    /// What the same selector used by the live resizer currently chooses.
+    pub selected_grid: Option<GridSize>,
+    pub leader: Option<ViewerIdentity>,
+    pub viewers: Vec<ViewerInfo>,
 }
 
 impl Display {
@@ -103,6 +183,7 @@ impl Core {
             ));
         }
         let channel = conn.new_channel();
+        let (origin, peer) = viewer_origin(&st, conn);
         let recovering = st.screens[&id].continuation().is_none();
         st.viewers.entry(id).or_default().push(Viewer {
             conn: conn.clone(),
@@ -113,9 +194,11 @@ impl Core {
             size: req.size,
             active_at: (!req.resumed).then(Instant::now),
             sized: false,
-            size_eligible: req.visible,
+            visible: req.visible,
             awaiting_size: req.resumed,
             visibility_updates: req.visibility_updates,
+            origin,
+            peer,
             desktop_group: req.desktop_group,
             display: req.display,
             recovering,
@@ -338,10 +421,13 @@ impl Core {
         let mut st = self.lock();
         let id = {
             let Some((id, viewer)) = Self::viewer(&mut st, conn, channel) else { return };
-            if viewer.observe || !viewer.visibility_updates || viewer.size_eligible == visible {
+            if !viewer.visibility_updates || viewer.visible == visible {
                 return;
             }
-            viewer.size_eligible = visible;
+            viewer.visible = visible;
+            if viewer.observe {
+                return;
+            }
             if visible {
                 // A view returning to the active workspace can lead its desktop
                 // group, but it still needs a physical size after a resume.
@@ -354,18 +440,21 @@ impl Core {
 
     pub fn viewer_facts(&self, conn: &Arc<Conn>, channel: u32, display: Display) {
         let mut st = self.lock();
-        let Some((id, v)) = Self::viewer(&mut st, conn, channel) else { return };
-        v.display.fg = display.fg.or(v.display.fg.take());
-        v.display.bg = display.bg.or(v.display.bg.take());
-        v.display.cursor = display.cursor.or(v.display.cursor.take());
-        v.display.cell = display.cell.or(v.display.cell);
-        let display = st.viewers[&id]
-            .iter()
-            .filter(|v| !v.observe)
-            .max_by_key(|v| v.active_at)
-            .filter(|v| Arc::ptr_eq(&v.conn, conn) && v.channel == channel)
-            .map(|v| v.display.clone());
-        if let Some(display) = display {
+        let id = {
+            let Some((id, v)) = Self::viewer(&mut st, conn, channel) else { return };
+            v.display.fg = display.fg.or(v.display.fg.take());
+            v.display.bg = display.bg.or(v.display.bg.take());
+            v.display.cursor = display.cursor.or(v.display.cursor.take());
+            v.display.cell = display.cell.or(v.display.cell);
+            id
+        };
+        let viewers = &st.viewers[&id];
+        let selection = select_sizing(viewers, self.settings().size_policy == crate::config::SizePolicy::Grouped);
+        let selected_display = selection
+            .leader
+            .filter(|leader| Arc::ptr_eq(&viewers[*leader].conn, conn) && viewers[*leader].channel == channel)
+            .map(|leader| viewers[leader].display.clone());
+        if let Some(display) = selected_display {
             self.apply_display(&mut st, id, Some(&display));
         }
     }
@@ -404,19 +493,65 @@ impl Core {
         }
     }
 
-    /// Fit the active device's desktop windows; display facts still follow activity.
+    /// A local snapshot of attached viewers and the exact selector result used for resizing.
+    pub fn viewer_list(&self, id: u32, terminal: String) -> ViewerListResult {
+        let st = self.lock();
+        let viewers = st.viewers.get(&id).map_or(&[][..], Vec::as_slice);
+        let selection = select_sizing(viewers, self.settings().size_policy == crate::config::SizePolicy::Grouped);
+        let current = st
+            .screens
+            .get(&id)
+            .map(|screen| screen.size())
+            .or_else(|| st.reg.terminals.get(&id).map(|record| (record.cols, record.rows)))
+            .unwrap_or_default();
+        let identity =
+            |index: usize| ViewerIdentity { connection_id: viewers[index].conn.id, channel: viewers[index].channel };
+        let now = Instant::now();
+        let details = viewers
+            .iter()
+            .enumerate()
+            .map(|(index, viewer)| ViewerInfo {
+                identity: identity(index),
+                origin: viewer.origin,
+                peer: viewer.peer.clone(),
+                peer_pid: (viewer.origin != ViewerOrigin::Relayed).then_some(viewer.conn.peer_pid).flatten(),
+                offered: GridSize { cols: viewer.size.0, rows: viewer.size.1 },
+                visible: viewer.visible,
+                size_eligible: selection.candidates.contains(&index),
+                visibility_updates: viewer.visibility_updates,
+                resize_notifications: viewer.resize_notifications,
+                observe: viewer.observe,
+                sized: viewer.sized,
+                awaiting_size: viewer.awaiting_size,
+                desktop_group: viewer
+                    .desktop_group
+                    .as_ref()
+                    .map(|(line, group)| ViewerDesktopGroup { line: line.clone(), group: group.clone() }),
+                active_ms_ago: viewer.active_at.map(|active| now.saturating_duration_since(active).as_millis() as u64),
+                leader: selection.leader == Some(index),
+                contributes_to_grid: selection.contributors.contains(&index),
+            })
+            .collect();
+        ViewerListResult {
+            terminal,
+            current_grid: GridSize { cols: current.0, rows: current.1 },
+            selected_grid: selection.size.map(|(cols, rows)| GridSize { cols, rows }),
+            leader: selection.leader.map(identity),
+            viewers: details,
+        }
+    }
+
+    /// Fit the selected desktop window group; display facts follow its sizing leader.
     fn apply_size(&self, st: &mut State, id: u32) {
-        let (leader, size) = viewer_size(
-            st.viewers.get(&id).map_or(&[], Vec::as_slice),
-            self.settings().size_policy == crate::config::SizePolicy::Grouped,
-        );
+        let viewers = st.viewers.get(&id).map_or(&[][..], Vec::as_slice);
+        let selection = select_sizing(viewers, self.settings().size_policy == crate::config::SizePolicy::Grouped);
         // Keep the holder's inherited grid while legacy relays resume. Focus,
         // input and hidden attach placeholders cannot replace a physical offer.
-        if leader.is_none() && st.viewers.get(&id).is_some_and(|vs| vs.iter().any(|v| !v.observe)) {
+        if selection.leader.is_none() && st.viewers.get(&id).is_some_and(|vs| vs.iter().any(|v| !v.observe)) {
             return;
         }
-        let (cols, rows) = size.unwrap_or_else(|| self.headless());
-        let display = leader.map(|v| v.display.clone());
+        let (cols, rows) = selection.size.unwrap_or_else(|| self.headless());
+        let display = selection.leader.map(|leader| st.viewers[&id][leader].display.clone());
         if !st.screens.contains_key(&id) {
             return;
         }
@@ -491,51 +626,70 @@ impl Core {
 }
 
 fn desktop_sizer(v: &Viewer) -> bool {
-    !v.observe
-        && v.size_eligible
-        && v.desktop_group.is_some()
-        && v.sized
-        && !v.awaiting_size
-        && v.size.0 > 0
-        && v.size.1 > 0
+    !v.observe && v.visible && v.desktop_group.is_some() && v.sized && !v.awaiting_size && v.size.0 > 0 && v.size.1 > 0
 }
 
-fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u16, u16)>) {
-    let awaiting_size = viewers.iter().any(|v| !v.observe && v.size_eligible && v.awaiting_size);
+#[derive(Default)]
+struct SizeSelection {
+    candidates: Vec<usize>,
+    leader: Option<usize>,
+    contributors: Vec<usize>,
+    size: Option<(u16, u16)>,
+}
+
+fn select_sizing(viewers: &[Viewer], grouped: bool) -> SizeSelection {
+    let awaiting_size = viewers.iter().any(|v| !v.observe && v.visible && v.awaiting_size);
     // A measured visible desktop owns the sizing device. Phone and legacy
     // viewers are fallback leaders only until such a desktop is available.
     let desktop_available = viewers.iter().any(desktop_sizer);
-    let leader = viewers
+    let candidates: Vec<usize> = viewers
         .iter()
-        .filter(|v| {
-            !v.observe
-                && v.size_eligible
+        .enumerate()
+        .filter_map(|(index, v)| {
+            (!v.observe
+                && v.visible
                 && !v.awaiting_size
                 && (!awaiting_size || v.sized)
-                && if desktop_available { desktop_sizer(v) } else { v.desktop_group.is_none() }
+                && if desktop_available { desktop_sizer(v) } else { v.desktop_group.is_none() })
+            .then_some(index)
         })
-        .max_by_key(|v| v.active_at);
-    let Some(leader) = leader else { return (None, None) };
-    let size = if grouped && leader.desktop_group.is_some() {
-        viewers
+        .collect();
+    let Some(leader) = candidates.iter().copied().max_by_key(|index| viewers[*index].active_at) else {
+        return SizeSelection { candidates, ..Default::default() };
+    };
+    let selected = &viewers[leader];
+    let (contributors, size) = if grouped && selected.desktop_group.is_some() {
+        let contributors: Vec<usize> = viewers
             .iter()
-            .filter(|v| {
-                !v.observe
-                    && v.desktop_group == leader.desktop_group
-                    && v.size_eligible
+            .enumerate()
+            .filter_map(|(index, v)| {
+                (!v.observe
+                    && v.desktop_group == selected.desktop_group
+                    && v.visible
                     && v.sized
                     && !v.awaiting_size
                     && v.size.0 > 0
                     && v.size.1 > 0
-                    && v.active_at.is_some()
+                    && v.active_at.is_some())
+                .then_some(index)
             })
-            .map(|v| v.size)
+            .collect();
+        let size = contributors
+            .iter()
+            .map(|index| viewers[*index].size)
             .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
-            .unwrap_or(leader.size)
+            .unwrap_or(selected.size);
+        (if contributors.is_empty() { vec![leader] } else { contributors }, size)
     } else {
-        leader.size
+        (vec![leader], selected.size)
     };
-    (Some(leader), Some(size))
+    SizeSelection { candidates, leader: Some(leader), contributors, size: Some(size) }
+}
+
+#[cfg(test)]
+fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u16, u16)>) {
+    let selection = select_sizing(viewers, grouped);
+    (selection.leader.map(|index| &viewers[index]), selection.size)
 }
 
 /// The screen, then the latest 7501 report of every record and whether the

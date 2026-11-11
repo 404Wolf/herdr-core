@@ -2,6 +2,7 @@
 //! Channel 0 carries JSON-RPC messages; attach streams get their own channels.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub const HEADER: usize = 9;
@@ -116,8 +117,11 @@ impl<R: AsyncRead + Unpin> AsyncRead for Watched<'_, R> {
 }
 
 /// A framed connection as the rest of the core sees it: queue frames, wake the writer.
-#[derive(Default)]
 pub struct Conn {
+    /// Monotonic identity for diagnostics; stable for this connection's lifetime.
+    pub(crate) id: u64,
+    /// Kernel-authenticated same-uid Unix peer. Never reported for peer-core lines.
+    pub(crate) peer_pid: Option<u32>,
     /// A verified local desktop app (possibly through its `hc connect` child).
     pub(crate) local_desktop: bool,
     outbox: std::sync::Mutex<Outbox>,
@@ -125,6 +129,22 @@ pub struct Conn {
     /// It fell too far behind (`MAX_CONTROL`): the connection must end.
     pub overflowed: tokio::sync::Notify,
     next_channel: std::sync::atomic::AtomicU32,
+}
+
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
+impl Default for Conn {
+    fn default() -> Self {
+        Self {
+            id: NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed),
+            peer_pid: None,
+            local_desktop: false,
+            outbox: std::sync::Mutex::new(Outbox::default()),
+            wake: tokio::sync::Notify::new(),
+            overflowed: tokio::sync::Notify::new(),
+            next_channel: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
 }
 
 impl Conn {

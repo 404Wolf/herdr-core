@@ -59,6 +59,7 @@ failed send: it may still have arrived; read first.
 ```sh
 hc ls                              # all live terminals, not just yours
 hc get review                      # one terminal's observed state/status
+hc viewers review                  # attached viewers and the exact selected grid (local core only)
 hc send review "Focus on the first bug"
 hc send --wait review "Recheck the fix"
 hc read --lines 100 review          # screen plus history; waits return status only
@@ -134,7 +135,13 @@ most recently active. With grouped sizing, visible panes in the selected
 desktop group share the smaller grid. `size_policy = "latest"` selects the
 latest active desktop pane instead; secondary viewers control size only when no
 eligible desktop pane remains. Focus between desktop panes keeps the shared
-grid; colors and cell facts still follow the latest active viewer.
+grid; colors and cell facts follow the selected sizing leader.
+`hc viewers <t>` reports attached viewers, negotiated resize/visibility
+capabilities, offered and selected grids, and the exact sizing candidates.
+It is read-only and local to the current core; it never queries peers. Legacy
+viewers without visibility updates remain visible until their connection ends.
+Viewer identities are connection-lifetime IDs; a same-uid local socket PID is
+shown when available (it may be an `hc connect` helper, not the app process).
 The same desktop group is forwarded when attaching to another machine;
 both cores must have this support. `terminal.attach`'s `desktop_group` is
 core-to-core metadata: ordinary clients cannot claim a group. Forwarded
@@ -166,6 +173,11 @@ desktop sizing; secondary viewers remain fallback-only. Set
 latest active desktop pane instead of fitting the group (default: `"grouped"`).
 Secondary viewers remain fallback-only. No restart needed;
 the setting applies on the next viewer activity, visibility change or detach.
+`hc viewers <t>` shows this core's attached views, verified local socket peer
+PID when available, offered geometry, effective visibility, selector eligibility,
+and the shared grid decision. It is local-only and read-only. Legacy viewers
+without visibility negotiation remain visible until their connection detaches;
+there is no idle timeout.
 
 ```sh
 hc run cargo test                  # wait, stream output, return its exit code
