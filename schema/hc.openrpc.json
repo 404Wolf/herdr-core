@@ -19,12 +19,17 @@
           },
           "terminal": {
             "$ref": "#/components/schemas/Terminal"
+          },
+          "visibility_updates": {
+            "description": "True only when every core on the path accepts viewer visibility updates.",
+            "type": "boolean"
           }
         },
         "required": [
           "channel",
           "terminal",
           "resize_notifications",
+          "visibility_updates",
           "automatic_input"
         ],
         "type": "object"
@@ -1479,12 +1484,12 @@
           }
         },
         {
-          "description": "Features supported by a core dialing in, including relaying size notifications.",
+          "description": "Features supported by a core dialing in, including relaying size and viewer visibility updates.",
           "name": "features",
           "required": false,
           "schema": {
             "default": [],
-            "description": "Features supported by a core dialing in, including relaying size notifications.",
+            "description": "Features supported by a core dialing in, including relaying size and viewer visibility updates.",
             "items": {
               "type": "string"
             },
@@ -2383,6 +2388,26 @@
           "schema": {
             "description": "The terminal: `t7`, a name, or `machine/t7`.",
             "type": "string"
+          }
+        },
+        {
+          "description": "The client understands the viewer-to-core VISIBILITY frame.",
+          "name": "visibility_updates",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "The client understands the viewer-to-core VISIBILITY frame.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "The view is visible on an active workspace and may constrain grouped desktop size.",
+          "name": "visible",
+          "required": false,
+          "schema": {
+            "default": true,
+            "description": "The view is visible on an active workspace and may constrain grouped desktop size.",
+            "type": "boolean"
           }
         }
       ],

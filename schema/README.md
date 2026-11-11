@@ -56,6 +56,7 @@ most 16 MiB.
 | 4 | FOCUS | viewer → core: 1 gained focus, 0 lost it |
 | 5 | FACTS | viewer → core: JSON display facts (`Display` in the schema) |
 | 6 | AUTOMATIC_INPUT | viewer → core: terminal-generated reply bytes, not human activity |
+| 7 | VISIBILITY | viewer → core: 1 visible on an active workspace, 0 hidden/off-workspace |
 
 Channel 0 carries JSON-RPC both ways. Calls on it run side by side.
 
@@ -99,6 +100,18 @@ serialized only when the observer has credit. The attach reply precedes stream
 frames, including on core-to-core relays and reconnects.
 Without this opt-in, existing event-driven observers keep their previous output
 behavior: no additional resize paints or RESIZE frames.
+
+Desktop viewers may request `visibility_updates: true` on `terminal.attach`.
+The optional `visible` value means the view is compositor-visible on an active
+workspace/window; it defaults to true for existing callers. The attach reply
+confirms `visibility_updates: true` only when every core on the path can relay
+VISIBILITY frames. Send kind 7 when compositor visibility changes, independently
+of focus and idle activity. If support is false or absent, do not send kind 7;
+the viewer remains eligible as with older cores. Grouped sizing includes only
+visible eligible viewers, while a visible idle viewer continues to constrain
+both axes. A hidden resumed viewer does not block sizing; when shown, it remains
+pending until a positive physical RESIZE arrives. VISIBILITY stays ordered with
+DATA and RESIZE, including across relays.
 
 Flow control: a stream starts with 256 KiB of credit. The viewer sends
 CREDIT for the bytes it has written out. A viewer that falls more than

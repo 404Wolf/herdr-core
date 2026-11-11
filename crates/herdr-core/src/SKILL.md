@@ -149,14 +149,18 @@ negotiated support ends the stream rather than sending an incompatible paint.
 Observers never control size, and a viewer returning after a dropped line
 does not constrain the desktop until active again. Attach placeholders are
 ignored until a window reports geometry. Sized desktop viewers keep their
-constraints while idle, until they detach or report a new size. The app
-keeps background tabs attached without reporting visibility, so a hidden
-tab can also constrain the grid and leave extra blank pane space. Exact
-visibility needs app support. Other operating systems retain latest-active
-sizing for local viewers, but accept forwarded desktop groups. Set
+constraints while idle, until hidden, detached or resized. Desktop apps may opt
+into `visibility_updates` on attach; `visible` defaults to true for old clients.
+The reply confirms the feature only when every relay hop supports it. Such apps
+send kind-7 VISIBILITY on compositor-visible active-workspace changes, separate
+from focus. Hidden views do not constrain the grouped grid. A hidden resumed
+view stays pending until it is shown and reports a positive physical RESIZE.
+Without negotiated support, clients stay visible/eligible as before. Other
+operating systems retain latest-active sizing for local viewers, but accept
+forwarded desktop groups. Set
 `size_policy = "latest"` in `~/.config/herdr-core/config.toml` to restore
 latest-active sizing on Linux too (default: `"grouped"`). No restart needed;
-the setting applies on the next viewer activity or detach.
+the setting applies on the next viewer activity, visibility change or detach.
 
 ```sh
 hc run cargo test                  # wait, stream output, return its exit code

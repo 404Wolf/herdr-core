@@ -107,7 +107,7 @@ pub struct HelloParams {
     pub core: Option<CoreInfo>,
     /// What that core calls this one (`rohan`), so news about `t7` reaches it as `rohan/t7`.
     pub calls_you: Option<String>,
-    /// Features supported by a core dialing in, including relaying size notifications.
+    /// Features supported by a core dialing in, including relaying size and viewer visibility updates.
     #[serde(default)]
     pub features: Vec<String>,
 }
@@ -385,6 +385,14 @@ pub struct AttachParams {
     #[arg(skip)]
     #[serde(default)]
     pub resize_notifications: bool,
+    /// The view is visible on an active workspace and may constrain grouped desktop size.
+    #[arg(skip)]
+    #[serde(default = "visible_by_default")]
+    pub visible: bool,
+    /// The client understands the viewer-to-core VISIBILITY frame.
+    #[arg(skip)]
+    #[serde(default)]
+    pub visibility_updates: bool,
     /// Scrollback lines to show first (main screen only).
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -421,8 +429,14 @@ pub struct AttachResult {
     /// True only when the entire path sends RESIZE before replacement paints.
     /// False or absent means the viewer must track size changes separately.
     pub resize_notifications: bool,
+    /// True only when every core on the path accepts viewer visibility updates.
+    pub visibility_updates: bool,
     /// The entire attach path accepts AUTOMATIC_INPUT (kind 6). Absent means use DATA.
     pub automatic_input: bool,
+}
+
+fn visible_by_default() -> bool {
+    true
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]

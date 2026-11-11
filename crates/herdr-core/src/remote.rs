@@ -20,12 +20,14 @@ use tokio::sync::{mpsc, oneshot};
 /// A viewer here that a stream there goes to: its connection and channel.
 type Sink = (Arc<Conn>, u32);
 /// A pending reply, its stream sink and whether resize support is required.
-type Waiting = (oneshot::Sender<Value>, Option<(Sink, bool)>);
+type Waiting = (oneshot::Sender<Value>, Option<(Sink, bool, bool)>);
 
 mod viewers;
 #[cfg(test)]
 use viewers::automatic_input;
-use viewers::{RESIZE_LOST, negotiate_resize, reattach};
+#[cfg(test)]
+use viewers::visibility_updates;
+use viewers::{RESIZE_LOST, VISIBILITY_LOST, negotiate_resize, reattach};
 pub use viewers::{Relayed, attach, conn_gone, relay_in};
 
 #[cfg(test)]
@@ -66,12 +68,20 @@ impl Line {
     /// A reply to one of our calls: to whoever waits for it.
     fn take_reply(&self, mut reply: Value) {
         let Some((waiter, sink)) = reply["id"].as_u64().and_then(|id| lock(&self.pending).remove(&id)) else { return };
-        if let (Some((sink, require_resize)), Some(there)) = (sink, reply["result"]["channel"].as_u64()) {
+        if let (Some((sink, require_resize, require_visibility)), Some(there)) =
+            (sink, reply["result"]["channel"].as_u64())
+        {
             if require_resize && reply["result"]["resize_notifications"] != true {
                 let _ = self.frames.send(wire::encode(there as u32, wire::CLOSE, b""));
                 reply = crate::rpc::response(
                     reply["id"].clone(),
                     Err(RpcError::new("unavailable", RESIZE_LOST, "attach again")),
+                );
+            } else if require_visibility && reply["result"]["visibility_updates"] != true {
+                let _ = self.frames.send(wire::encode(there as u32, wire::CLOSE, b""));
+                reply = crate::rpc::response(
+                    reply["id"].clone(),
+                    Err(RpcError::new("unavailable", VISIBILITY_LOST, "attach again")),
                 );
             } else {
                 lock(&self.streams).insert(there as u32, sink);
@@ -102,7 +112,7 @@ impl Line {
         machine: &str,
         method: &str,
         params: Value,
-        sink: Option<(Sink, bool)>,
+        sink: Option<(Sink, bool, bool)>,
         deadline: Duration,
     ) -> Result<Value, RpcError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);

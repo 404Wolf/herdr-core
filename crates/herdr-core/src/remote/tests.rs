@@ -17,6 +17,79 @@ fn automatic_input_requires_support_at_every_hop() {
     }
 }
 
+#[test]
+fn viewer_visibility_requires_confirmation_from_every_hop() {
+    for features in [json!([]), json!(["viewer_visibility"])] {
+        let (frames, _rx) = mpsc::unbounded_channel();
+        let line = Line::new(frames, &json!({"features": features}));
+        for reply in [json!({}), json!({"visibility_updates": false}), json!({"visibility_updates": true})] {
+            assert_eq!(
+                visibility_updates(&line, true, &reply),
+                line.features.iter().any(|f| f == "viewer_visibility") && reply["visibility_updates"] == true
+            );
+        }
+        assert!(!visibility_updates(&line, false, &json!({"visibility_updates": true})));
+    }
+}
+
+#[tokio::test]
+async fn viewer_visibility_frame_stays_ordered_with_data_and_resize_across_a_relay() {
+    let root = std::path::PathBuf::from(format!(
+        "/var/tmp/hc-visibility-relay-{}-{}",
+        std::process::id(),
+        crate::platform::random_hex()
+    ));
+    let paths = Paths {
+        socket: root.join("core.sock"),
+        holder_socket: root.join("holder.sock"),
+        state: root.clone(),
+        config: root.join("config.toml"),
+    };
+    paths.create_dirs().unwrap();
+    let core = Core::start(paths, crate::api::CoreInfo { id: "here".into(), name: "here".into() }).unwrap();
+    let conn = Arc::new(Conn::default());
+    conn.with(|out| out.open(7));
+    let (frames, mut rx) = mpsc::unbounded_channel();
+    core.lock().relayed.insert(
+        (conn_key(&conn), 7),
+        Relayed {
+            automatic_input: false,
+            visibility_updates: true,
+            line: Line::new(frames, &json!({"features": ["viewer_visibility"]})),
+            there: 9,
+            conn: conn.clone(),
+            machine: "remote".into(),
+            params: json!({"visible": true, "visibility_updates": true}),
+        },
+    );
+
+    let mut input = [
+        wire::encode(7, wire::DATA, b"before resize"),
+        wire::encode(7, wire::RESIZE, &[218, 0, 74, 0]),
+        wire::encode(7, wire::VISIBILITY, &[0]),
+        wire::encode(7, wire::DATA, b"after hidden"),
+    ]
+    .concat();
+    let mut reader = std::io::Cursor::new(&mut input);
+    let mut forwarded = Vec::new();
+    while let Some((channel, kind, payload)) = wire::read_frame(&mut reader).await.unwrap() {
+        assert!(relay_in(&core, &conn, channel, kind, &payload));
+        forwarded.push(rx.recv().await.unwrap());
+    }
+    assert_eq!(
+        forwarded,
+        [
+            wire::encode(9, wire::DATA, b"before resize"),
+            wire::encode(9, wire::RESIZE, &[218, 0, 74, 0]),
+            wire::encode(9, wire::VISIBILITY, &[0]),
+            wire::encode(9, wire::DATA, b"after hidden"),
+        ]
+    );
+    assert_eq!(core.lock().relayed[&(conn_key(&conn), 7)].params["visible"], false);
+    drop(core);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn automatic_input_survives_relays_but_not_a_capability_downgrade() {
     for (feature, confirmed) in [(false, true), (true, false), (true, true)] {
@@ -50,6 +123,7 @@ async fn automatic_input_survives_relays_but_not_a_capability_downgrade() {
             (conn_key(&conn), 7),
             Relayed {
                 automatic_input: true,
+                visibility_updates: false,
                 line: Line::new(old_frames, &json!({"features": ["automatic_input"]})),
                 there: 9,
                 conn: conn.clone(),
@@ -105,7 +179,7 @@ async fn reconnect_rejects_downgrade_before_mapping_fallback_data() {
                     "relay",
                     "terminal.attach",
                     json!({"observe": true, "resumed": true, "resize_notifications": true}),
-                    Some(((sink, 7), true)),
+                    Some(((sink, 7), true, false)),
                     Duration::from_secs(1),
                 )
                 .await
@@ -170,6 +244,7 @@ async fn failed_reattach_drains_pending_data_before_close() {
         (conn_key(&conn), 7),
         Relayed {
             automatic_input: true,
+            visibility_updates: false,
             line: old_line,
             there: 9,
             conn: conn.clone(),

@@ -21,8 +21,10 @@ fn viewer(conn: &Arc<Conn>, size: (u16, u16), active_at: Option<Instant>) -> Vie
         repaint_pending: false,
         size,
         active_at,
+        size_eligible: true,
         sized: true,
         awaiting_size: false,
+        visibility_updates: true,
         desktop_group: conn.local_desktop.then(|| ("local".into(), "desktop".into())),
         display: Display::default(),
         recovering: false,
@@ -87,6 +89,40 @@ fn phones_observers_resumed_and_placeholder_viewers_do_not_pin_desktop_size() {
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "zero size does not constrain");
 }
 
+#[test]
+fn grouped_size_uses_visible_min_and_visibility_restores_the_grid() {
+    let now = Instant::now();
+    let portrait = desktop_conn();
+    let landscape = desktop_conn();
+    let mut vs = vec![viewer(&portrait, (218, 168), Some(now)), viewer(&landscape, (218, 74), Some(now))];
+
+    vs[1].size_eligible = false;
+    assert_eq!(viewer_size(&vs, true).1, Some((218, 168)), "off-workspace view is excluded");
+
+    vs[1].size_eligible = true;
+    assert_eq!(viewer_size(&vs, true).1, Some((218, 74)), "visible view constrains both axes");
+
+    vs[1].size_eligible = false;
+    assert_eq!(viewer_size(&vs, true).1, Some((218, 168)), "hiding restores the larger grid");
+}
+
+#[test]
+fn focus_and_idle_do_not_change_visibility_eligibility() {
+    let now = Instant::now();
+    let large = desktop_conn();
+    let small = desktop_conn();
+    let mut vs = vec![viewer(&large, (218, 168), Some(now)), viewer(&small, (218, 74), Some(now))];
+    vs[1].active_at = Some(now - std::time::Duration::from_secs(3600));
+    assert!(vs[1].size_eligible);
+    assert_eq!(viewer_size(&vs, true).1, Some((218, 74)), "an idle visible view still constrains");
+
+    vs[1].active_at = None;
+    assert_eq!(viewer_size(&vs, true).1, Some((218, 168)), "a returning viewer without a fresh size cannot constrain");
+    vs[1].size_eligible = true;
+    vs[1].active_at = Some(now - std::time::Duration::from_secs(3600));
+    assert_eq!(viewer_size(&vs, true).1, Some((218, 74)), "visibility, not recency, admits the measured size");
+}
+
 fn core_with_screen(cols: u16, rows: u16) -> (Arc<Core>, u32, std::path::PathBuf) {
     let root = std::path::PathBuf::from(format!("/var/tmp/hc-resize-{}", crate::platform::random_hex()));
     let paths = crate::paths::Paths {
@@ -120,6 +156,8 @@ fn resumed_viewers_hold_the_inherited_grid_until_a_physical_size_arrives() {
         let request = |size, resumed, observe| AttachRequest {
             observe,
             resize_notifications: notifications,
+            visible: true,
+            visibility_updates: true,
             history: 0,
             size,
             display: Display::default(),
@@ -152,6 +190,65 @@ fn resumed_viewers_hold_the_inherited_grid_until_a_physical_size_arrives() {
     }
 }
 
+#[test]
+fn visibility_updates_recompute_the_grid_and_resumed_views_wait_for_measurement() {
+    let (core, id, root) = core_with_screen(103, 74);
+    let portrait = desktop_conn();
+    let landscape = desktop_conn();
+    let request = |size, resumed, visible| AttachRequest {
+        observe: false,
+        resize_notifications: true,
+        visible,
+        visibility_updates: true,
+        history: 0,
+        size,
+        display: Display::default(),
+        resumed,
+        desktop_group: Some(("line".into(), "desktop".into())),
+    };
+    let grid = || core.lock().screens[&id].size();
+
+    let p = core.attach(&portrait, id, request((218, 168), false, true)).unwrap();
+    core.viewer_resize(&portrait, p, 218, 168);
+    assert_eq!(grid(), (218, 168));
+
+    let l = core.attach(&landscape, id, request((218, 74), true, false)).unwrap();
+    assert_eq!(grid(), (218, 168), "hidden resumed placeholder neither leads nor blocks");
+    core.viewer_visibility(&landscape, l, true);
+    assert_eq!(grid(), (218, 168), "showing an unmeasured resumed view holds the inherited grid");
+    core.viewer_focus(&landscape, l, false);
+    core.viewer_input(&landscape, l, b"", false);
+    core.viewer_resize(&landscape, l, 0, 0);
+    assert_eq!(grid(), (218, 168), "focus, input and zero size cannot release the resume hold");
+
+    core.viewer_resize(&landscape, l, 218, 74);
+    assert_eq!(grid(), (218, 74), "first positive physical measurement releases the hold");
+    core.viewer_visibility(&landscape, l, false);
+    assert_eq!(grid(), (218, 168), "hiding the smaller view restores the larger grid");
+    core.viewer_focus(&landscape, l, true);
+    core.viewer_focus(&landscape, l, false);
+    assert_eq!(grid(), (218, 168), "focus cannot make a hidden view eligible");
+
+    core.viewer_visibility(&landscape, l, true);
+    assert_eq!(grid(), (218, 74), "showing a measured view restores its constraint");
+    core.viewer_focus(&landscape, l, false);
+    assert_eq!(grid(), (218, 74), "focus loss does not hide a visible constraint");
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_attach_visibility_defaults_to_eligible() {
+    let params: crate::api::AttachParams = serde_json::from_value(serde_json::json!({
+        "terminal": "t1",
+        "cols": 80,
+        "rows": 24
+    }))
+    .unwrap();
+    assert!(params.visible);
+    assert!(!params.visibility_updates);
+}
+
 fn drain(conn: &Arc<Conn>, channel: u32, screen: &mut ghostty_vt::Terminal) {
     conn.with(|out| {
         out.resume(channel);
@@ -174,6 +271,8 @@ fn wider_desktop_viewer_wraps_inline_redraw_at_the_shared_width() {
     let request = |size| AttachRequest {
         observe: false,
         resize_notifications: true,
+        visible: true,
+        visibility_updates: true,
         history: 0,
         size,
         display: Display::default(),
@@ -221,6 +320,8 @@ fn larger_desktop_viewers_keep_only_the_shared_scrolling_grid() {
     let request = |size| AttachRequest {
         observe: false,
         resize_notifications: false,
+        visible: true,
+        visibility_updates: true,
         history: 0,
         size,
         display: Display::default(),
@@ -277,6 +378,8 @@ fn resize_drags_serialize_nothing_without_observers_and_only_latest_when_stalled
     let request = |observe, resize_notifications| AttachRequest {
         observe,
         resize_notifications,
+        visible: true,
+        visibility_updates: false,
         history: 0,
         size: (80, 24),
         display: Display::default(),

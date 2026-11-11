@@ -39,8 +39,12 @@ pub struct Viewer {
     active_at: Option<Instant>,
     /// Desktop apps attach hidden tabs with a placeholder before reporting geometry.
     sized: bool,
+    /// Whether this desktop view is currently eligible to constrain the PTY grid.
+    size_eligible: bool,
     /// A relayed reconnect carries cached geometry, not a new physical offer.
     awaiting_size: bool,
+    /// The attach path negotiated the viewer-to-core VISIBILITY frame.
+    visibility_updates: bool,
     /// The source line's machine and the desktop identity carried on that line.
     desktop_group: Option<(String, String)>,
     display: Display,
@@ -68,6 +72,8 @@ pub struct AttachRequest {
     pub size: (u16, u16),
     pub display: Display,
     pub resumed: bool,
+    pub visible: bool,
+    pub visibility_updates: bool,
     pub desktop_group: Option<(String, String)>,
 }
 
@@ -107,7 +113,9 @@ impl Core {
             size: req.size,
             active_at: (!req.resumed).then(Instant::now),
             sized: false,
+            size_eligible: req.visible,
             awaiting_size: req.resumed,
+            visibility_updates: req.visibility_updates,
             desktop_group: req.desktop_group,
             display: req.display,
             recovering,
@@ -309,6 +317,25 @@ impl Core {
         conn.wake.notify_one();
     }
 
+    /// Update size eligibility independently from focus or input activity.
+    pub fn viewer_visibility(&self, conn: &Arc<Conn>, channel: u32, visible: bool) {
+        let mut st = self.lock();
+        let id = {
+            let Some((id, viewer)) = Self::viewer(&mut st, conn, channel) else { return };
+            if viewer.observe || !viewer.visibility_updates || viewer.size_eligible == visible {
+                return;
+            }
+            viewer.size_eligible = visible;
+            if visible {
+                // A view returning to the active workspace can lead its desktop
+                // group, but it still needs a physical size after a resume.
+                viewer.active_at = Some(Instant::now());
+            }
+            id
+        };
+        self.apply_size(&mut st, id);
+    }
+
     pub fn viewer_facts(&self, conn: &Arc<Conn>, channel: u32, display: Display) {
         let mut st = self.lock();
         let Some((id, v)) = Self::viewer(&mut st, conn, channel) else { return };
@@ -448,10 +475,10 @@ impl Core {
 }
 
 fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u16, u16)>) {
-    let awaiting_size = viewers.iter().any(|v| !v.observe && v.awaiting_size);
+    let awaiting_size = viewers.iter().any(|v| !v.observe && v.size_eligible && v.awaiting_size);
     let leader = viewers
         .iter()
-        .filter(|v| !v.observe && !v.awaiting_size && (!awaiting_size || v.sized))
+        .filter(|v| !v.observe && v.size_eligible && !v.awaiting_size && (!awaiting_size || v.sized))
         .max_by_key(|v| v.active_at);
     let Some(leader) = leader else { return (None, None) };
     let size = if grouped && leader.desktop_group.is_some() {
@@ -460,6 +487,7 @@ fn viewer_size(viewers: &[Viewer], grouped: bool) -> (Option<&Viewer>, Option<(u
             .filter(|v| {
                 !v.observe
                     && v.desktop_group == leader.desktop_group
+                    && v.size_eligible
                     && v.sized
                     && v.size.0 > 0
                     && v.size.1 > 0

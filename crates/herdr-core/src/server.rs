@@ -362,6 +362,9 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
             (ch, wire::RESIZE) if payload.len() == 4 => {
                 core.viewer_resize(conn, ch, u16_at(&payload, 0), u16_at(&payload, 2))
             }
+            (ch, wire::VISIBILITY) if payload.len() == 1 && payload[0] <= 1 => {
+                core.viewer_visibility(conn, ch, payload[0] == 1)
+            }
             (ch, wire::FOCUS) => core.viewer_focus(conn, ch, payload.first() == Some(&1)),
             (ch, wire::FACTS) => {
                 if let Ok(display) = serde_json::from_slice(&payload) {

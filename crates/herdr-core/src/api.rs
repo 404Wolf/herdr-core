@@ -14,7 +14,7 @@ use std::time::Duration;
 
 pub const GENERATION: u32 = 1;
 pub const FEATURES: &[&str] =
-    &["framed", "attach", "events", "status", "shell", "resize_notifications", "automatic_input"];
+    &["framed", "attach", "events", "status", "shell", "resize_notifications", "automatic_input", "viewer_visibility"];
 pub const FINISHED_LINES: usize = 1000;
 /// A terminal's identity: fixed at start from whoever starts it.
 pub const IDENTITY_VARS: &[&str] = &["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"];
@@ -435,6 +435,8 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
         size: (p.cols, p.rows),
         display: p.display,
         resumed: p.resumed,
+        visible: !p.visibility_updates || p.visible,
+        visibility_updates: p.visibility_updates,
         desktop_group: core.desktop_group(conn, p.desktop_group.as_deref()),
     };
     let channel = core.attach(conn, id, req)?;
@@ -442,6 +444,7 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
         channel,
         terminal: Public(record(core, id)?),
         resize_notifications: p.resize_notifications,
+        visibility_updates: p.visibility_updates,
         automatic_input: true,
     })
 }

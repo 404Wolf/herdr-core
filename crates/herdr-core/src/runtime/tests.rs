@@ -27,6 +27,8 @@ async fn keys_pressed_during_a_paste_follow_its_submit() {
             AttachRequest {
                 observe: false,
                 resize_notifications: false,
+                visible: true,
+                visibility_updates: false,
                 history: 0,
                 size: (80, 24),
                 display: Display::default(),
