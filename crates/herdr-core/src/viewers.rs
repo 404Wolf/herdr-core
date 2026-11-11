@@ -306,6 +306,22 @@ impl Core {
 
     pub fn viewer_resize(&self, conn: &Arc<Conn>, channel: u32, cols: u16, rows: u16) {
         let mut st = self.lock();
+        // The app remeasures after ordered grid paints. Once a negotiated
+        // interactive viewer has reported physical geometry, an identical
+        // fresh offer is not new activity: touching it could switch sizing
+        // between desktop groups and trigger another remeasure. A resumed
+        // viewer still passes through this path until its first fresh offer.
+        if Self::viewer(&mut st, conn, channel).is_some_and(|(_, v)| {
+            !v.observe
+                && v.resize_notifications
+                && v.visibility_updates
+                && v.sized
+                && !v.awaiting_size
+                && v.size == (cols, rows)
+        }) {
+            conn.wake.notify_one();
+            return;
+        }
         self.touch(&mut st, conn, channel, |v| {
             v.size = (cols, rows);
             v.sized = true;

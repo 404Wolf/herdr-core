@@ -237,6 +237,52 @@ fn visibility_updates_recompute_the_grid_and_resumed_views_wait_for_measurement(
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn fresh_same_size_reoffers_do_not_ping_pong_between_desktop_groups() {
+    let (core, id, root) = core_with_screen(100, 40);
+    let wide = desktop_conn();
+    let narrow = desktop_conn();
+    let request = |size, group: &str, resumed| AttachRequest {
+        observe: false,
+        resize_notifications: true,
+        visible: true,
+        visibility_updates: true,
+        history: 0,
+        size,
+        display: Display::default(),
+        resumed,
+        desktop_group: Some(("line".into(), group.into())),
+    };
+    let a = core.attach(&wide, id, request((100, 40), "wide", false)).unwrap();
+    core.viewer_resize(&wide, a, 100, 40);
+    let b = core.attach(&narrow, id, request((80, 24), "narrow", false)).unwrap();
+    core.viewer_resize(&narrow, b, 80, 24);
+    let grid = || core.lock().screens[&id].size();
+    assert_eq!(grid(), (80, 24));
+
+    // Drain any wake caused by setup. An identical offer still wakes the
+    // writer, but must not refresh activity and steal desktop-group leadership.
+    tokio::time::timeout(std::time::Duration::from_secs(1), wide.wake.notified()).await.unwrap();
+    core.viewer_resize(&wide, a, 100, 40);
+    tokio::time::timeout(std::time::Duration::from_secs(1), wide.wake.notified()).await.unwrap();
+    assert_eq!(grid(), (80, 24), "unchanged physical reoffer must not select another desktop group");
+    for _ in 0..3 {
+        core.viewer_resize(&narrow, b, 80, 24);
+        core.viewer_resize(&wide, a, 100, 40);
+        assert_eq!(grid(), (80, 24), "identical reoffers must not ping-pong group leadership");
+    }
+
+    core.viewer_resize(&wide, a, 110, 45);
+    assert_eq!(grid(), (110, 45), "a changed physical offer still selects its group");
+    let resumed = desktop_conn();
+    let c = core.attach(&resumed, id, request((90, 30), "resumed", true)).unwrap();
+    assert_eq!(grid(), (110, 45));
+    core.viewer_resize(&resumed, c, 90, 30);
+    assert_eq!(grid(), (90, 30), "an unchanged cached offer must still release a resumed hold");
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn legacy_attach_visibility_defaults_to_eligible() {
     let params: crate::api::AttachParams = serde_json::from_value(serde_json::json!({
