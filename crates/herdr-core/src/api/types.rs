@@ -107,7 +107,7 @@ pub struct HelloParams {
     pub core: Option<CoreInfo>,
     /// What that core calls this one (`rohan`), so news about `t7` reaches it as `rohan/t7`.
     pub calls_you: Option<String>,
-    /// Features supported by a core dialing in, including relaying size and viewer visibility updates.
+    /// Features supported by a core dialing in, including relaying size, visibility and focus updates.
     #[serde(default)]
     pub features: Vec<String>,
 }
@@ -391,7 +391,7 @@ pub struct AttachParams {
     #[arg(skip)]
     #[serde(default)]
     pub resize_notifications: bool,
-    /// The view is visible on an active workspace and may constrain grouped desktop size.
+    /// The view is visible on an active workspace; hidden followers cannot claim focus.
     #[arg(skip)]
     #[serde(default = "visible_by_default")]
     pub visible: bool,
@@ -399,6 +399,14 @@ pub struct AttachParams {
     #[arg(skip)]
     #[serde(default)]
     pub visibility_updates: bool,
+    /// The desktop client reports active-window/pane focus through FOCUS frames.
+    #[arg(skip)]
+    #[serde(default)]
+    pub focus_updates: bool,
+    /// This pane is focused in the active desktop window. Ignored without focus_updates.
+    #[arg(skip)]
+    #[serde(default)]
+    pub focused: bool,
     /// Scrollback lines to show first (main screen only).
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -437,6 +445,8 @@ pub struct AttachResult {
     pub resize_notifications: bool,
     /// True only when every core on the path accepts viewer visibility updates.
     pub visibility_updates: bool,
+    /// True only when every core on the path supports focused desktop sizing.
+    pub focus_updates: bool,
     /// The entire attach path accepts AUTOMATIC_INPUT (kind 6). Absent means use DATA.
     pub automatic_input: bool,
 }

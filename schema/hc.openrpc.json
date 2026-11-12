@@ -13,6 +13,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "focus_updates": {
+            "description": "True only when every core on the path supports focused desktop sizing.",
+            "type": "boolean"
+          },
           "resize_notifications": {
             "description": "True only when the entire path sends RESIZE before replacement paints.\nFalse or absent means the viewer must track size changes separately.",
             "type": "boolean"
@@ -30,6 +34,7 @@
           "terminal",
           "resize_notifications",
           "visibility_updates",
+          "focus_updates",
           "automatic_input"
         ],
         "type": "object"
@@ -1438,7 +1443,7 @@
             "type": "boolean"
           },
           "contributes_to_grid": {
-            "description": "Included in the selected group's min-grid, or the selected fallback size.",
+            "description": "The sole selected viewer whose offer or sticky focus grid sets the size.",
             "type": "boolean"
           },
           "desktop_group": {
@@ -1450,6 +1455,14 @@
                 "type": "null"
               }
             ]
+          },
+          "focus_updates": {
+            "description": "The attach path negotiated focused desktop sizing.",
+            "type": "boolean"
+          },
+          "focused": {
+            "description": "Last reported active-window/pane focus state, independent of sticky leadership.",
+            "type": "boolean"
           },
           "identity": {
             "$ref": "#/components/schemas/ViewerIdentity"
@@ -1496,7 +1509,7 @@
             "type": "boolean"
           },
           "visible": {
-            "description": "Effective visibility; legacy clients remain visible until detach.",
+            "description": "Effective visibility; legacy clients remain visible until detach. Sticky focus ownership can remain hidden.",
             "type": "boolean"
           }
         },
@@ -1507,6 +1520,8 @@
           "visible",
           "size_eligible",
           "visibility_updates",
+          "focus_updates",
+          "focused",
           "resize_notifications",
           "observe",
           "sized",
@@ -1684,12 +1699,12 @@
           }
         },
         {
-          "description": "Features supported by a core dialing in, including relaying size and viewer visibility updates.",
+          "description": "Features supported by a core dialing in, including relaying size, visibility and focus updates.",
           "name": "features",
           "required": false,
           "schema": {
             "default": [],
-            "description": "Features supported by a core dialing in, including relaying size and viewer visibility updates.",
+            "description": "Features supported by a core dialing in, including relaying size, visibility and focus updates.",
             "items": {
               "type": "string"
             },
@@ -2568,6 +2583,26 @@
           }
         },
         {
+          "description": "The desktop client reports active-window/pane focus through FOCUS frames.",
+          "name": "focus_updates",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "The desktop client reports active-window/pane focus through FOCUS frames.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "This pane is focused in the active desktop window. Ignored without focus_updates.",
+          "name": "focused",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "This pane is focused in the active desktop window. Ignored without focus_updates.",
+            "type": "boolean"
+          }
+        },
+        {
           "description": "Scrollback lines to show first (main screen only).",
           "name": "history",
           "required": false,
@@ -2639,12 +2674,12 @@
           }
         },
         {
-          "description": "The view is visible on an active workspace and may constrain grouped desktop size.",
+          "description": "The view is visible on an active workspace; hidden followers cannot claim focus.",
           "name": "visible",
           "required": false,
           "schema": {
             "default": true,
-            "description": "The view is visible on an active workspace and may constrain grouped desktop size.",
+            "description": "The view is visible on an active workspace; hidden followers cannot claim focus.",
             "type": "boolean"
           }
         }

@@ -128,14 +128,23 @@ still resize the terminal normally. `display: {fg, bg, cursor, cell}` (as in
 `terminal.attach`) likewise answers the program's color and cell-size queries
 from its start, before any viewer attaches.
 
-A visible, measured desktop pane owns sizing before phones, SSH clients or
-other secondary viewers. The most recently active eligible desktop viewer's
-offer is the grid: other channels, including channels in its desktop group,
-never reduce it. Both `size_policy = "grouped"` (the default) and `"latest"`
-use this single-leader policy. Secondary viewers control size only when no
-eligible desktop pane remains. Colors and cell facts follow the same leader.
+Desktop clients negotiate `focus_updates` and initial `focused` on attach,
+then send ordered FOCUS (kind 4, one byte 0/1) for the action-target pane in
+the active window. `hello` advertises `viewer_focus`; the attach reply confirms
+support across every hop. Ordinary clients cannot claim desktop identity.
+A focused desktop viewer's full offer is the grid, including when relayed
+from another machine. Manual input also transfers ownership; automatic replies
+never do. Size, visibility and display refreshes cannot transfer it.
+After blur or hiding, the last focused viewer retains its last selected grid
+while attached. Other panes, old clients and phones cannot shrink it. If that
+viewer detaches, hold the inherited grid until another focus-capable desktop
+reports focus or manual input. Before any focus/measurement, hold the grid too.
+When no focus-capable desktop is attached, use the most recently active eligible
+visible desktop offer, or a secondary viewer if no measured desktop remains.
+Both `size_policy = "grouped"` (default) and `"latest"` use this single-leader
+policy; other channels never contribute a minimum. There is no freshness timeout.
 `hc viewers <t>` reports attached viewers, negotiated resize/visibility
-capabilities, offered and selected grids, and the exact sizing candidates.
+capabilities (including focus), offered and selected grids, and the exact sizing candidates.
 It is read-only and local to the current core; it never queries peers. Legacy
 viewers without visibility updates remain visible until their connection ends.
 Viewer identities are connection-lifetime IDs; a same-uid local socket PID is
@@ -155,27 +164,21 @@ interactive viewers too: render those rows and columns, but keep reporting the
 pane's available geometry separately. The reply confirms support across the
 whole path; false or absent retains legacy sizing. A reconnect that loses
 negotiated support ends the stream rather than sending an incompatible paint.
-Observers never control size, and a viewer returning after a dropped line
-does not constrain the desktop until active again. Attach placeholders are
-ignored until a window reports geometry. Sized desktop viewers keep their
-constraints while idle, until hidden, detached or resized. Desktop apps may opt
-into `visibility_updates` on attach; `visible` defaults to true for old clients.
-The reply confirms the feature only when every relay hop supports it. Such apps
-send kind-7 VISIBILITY on compositor-visible active-workspace changes, separate
-from focus. Hidden views do not constrain the grouped grid. A hidden resumed
-view stays pending until it is shown and reports a positive physical RESIZE.
-Without negotiated support, clients stay visible/eligible as before. The
-hosting core applies its `size_policy` to choose group-fit versus latest
-desktop sizing; secondary viewers remain fallback-only. Set
-`size_policy = "latest"` in `~/.config/herdr-core/config.toml` to use the
-latest active desktop pane instead of fitting the group (default: `"grouped"`).
-Secondary viewers remain fallback-only. No restart needed;
-the setting applies on the next viewer activity, visibility change or detach.
-`hc viewers <t>` shows this core's attached views, verified local socket peer
-PID when available, offered geometry, effective visibility, selector eligibility,
-and the shared grid decision. It is local-only and read-only. Legacy viewers
-without visibility negotiation remain visible until their connection detaches;
-there is no idle timeout.
+Observers never control size. A resumed focus leader holds the inherited grid
+until a positive physical RESIZE; cached geometry, focus and typing cannot
+release that measurement hold. Attach placeholders are ignored until measured.
+Desktop apps may also opt into `visibility_updates`; `visible` defaults to true
+for old clients. Send kind-7 VISIBILITY for compositor/workspace visibility,
+separately from active-window focus. Hidden followers cannot claim ownership;
+a hidden last-focused owner keeps its frozen grid. A reconnect that loses
+negotiated focus, visibility or resize support ends the stream rather than
+silently delivering a fallback contract. Clients must gate focus opt-in on
+`viewer_focus` in the first-hop hello as well as the attach reply, so an older
+relay cannot forward an unverified desktop focus claim.
+`hc viewers <t>` is read-only and local-only. It shows capabilities, last reported
+focus, the selected/sticky leader, physical offers, eligibility and the same grid
+selector used by the resizer. Legacy viewers remain visible until disconnect;
+visibility alone grants no leadership while a focus-capable desktop is attached.
 
 ```sh
 hc run cargo test                  # wait, stream output, return its exit code

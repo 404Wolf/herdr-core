@@ -13,6 +13,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(test)]
+mod focus_tests;
+#[cfg(test)]
+mod sizing_tests;
+#[cfg(test)]
 mod tests;
 
 /// What a viewer's own terminal looks like, reported by the client.
@@ -45,6 +49,12 @@ pub struct Viewer {
     awaiting_size: bool,
     /// The attach path negotiated the viewer-to-core VISIBILITY frame.
     visibility_updates: bool,
+    focus_updates: bool,
+    focused: bool,
+    /// One owner per terminal; cleared on other viewers when focus/input claims it.
+    focus_leader: bool,
+    /// Frozen on blur/hidden; physical reoffers from followers cannot change it.
+    focus_grid: Option<(u16, u16)>,
     /// Origin is captured at attach so peer-line cleanup cannot relabel a viewer.
     origin: ViewerOrigin,
     peer: Option<String>,
@@ -105,11 +115,15 @@ pub struct ViewerInfo {
     /// Never populated for relayed connections; unavailable credentials/PID are null.
     pub peer_pid: Option<u32>,
     pub offered: GridSize,
-    /// Effective visibility; legacy clients remain visible until detach.
+    /// Effective visibility; legacy clients remain visible until detach. Sticky focus ownership can remain hidden.
     pub visible: bool,
     /// Candidate in the current sizing selector (can be false while visible).
     pub size_eligible: bool,
     pub visibility_updates: bool,
+    /// The attach path negotiated focused desktop sizing.
+    pub focus_updates: bool,
+    /// Last reported active-window/pane focus state, independent of sticky leadership.
+    pub focused: bool,
     pub resize_notifications: bool,
     pub observe: bool,
     pub sized: bool,
@@ -118,7 +132,7 @@ pub struct ViewerInfo {
     /// Milliseconds since last focus/input/size/visibility activity.
     pub active_ms_ago: Option<u64>,
     pub leader: bool,
-    /// Included in the selected group's min-grid, or the selected fallback size.
+    /// The sole selected viewer whose offer or sticky focus grid sets the size.
     pub contributes_to_grid: bool,
 }
 
@@ -154,6 +168,8 @@ pub struct AttachRequest {
     pub resumed: bool,
     pub visible: bool,
     pub visibility_updates: bool,
+    pub focus_updates: bool,
+    pub focused: bool,
     pub desktop_group: Option<(String, String)>,
 }
 
@@ -182,6 +198,7 @@ impl Core {
                 format!("read what it left: hc read {}", crate::terminals::address(id)),
             ));
         }
+        let focus_updates = req.focus_updates && req.desktop_group.is_some();
         let channel = conn.new_channel();
         let (origin, peer) = viewer_origin(&st, conn);
         let recovering = st.screens[&id].continuation().is_none();
@@ -197,12 +214,19 @@ impl Core {
             visible: req.visible,
             awaiting_size: req.resumed,
             visibility_updates: req.visibility_updates,
+            focus_updates,
+            focused: focus_updates && req.focused,
+            focus_leader: false,
+            focus_grid: None,
             origin,
             peer,
             desktop_group: req.desktop_group,
             display: req.display,
             recovering,
         });
+        if focus_updates && req.focused {
+            Self::claim_focus(&mut st, id, conn, channel);
+        }
         self.apply_size(&mut st, id);
         let paint = first_paint(&st, id, req.history);
         st.viewers.get_mut(&id).unwrap().last_mut().unwrap().repaint_pending = false;
@@ -360,6 +384,27 @@ impl Core {
         })
     }
 
+    /// Only an explicit desktop focus/input signal transfers ownership.
+    fn claim_focus(st: &mut State, id: u32, conn: &Arc<Conn>, channel: u32) {
+        let Some(viewers) = st.viewers.get_mut(&id) else { return };
+        if !viewers.iter().any(|v| {
+            Arc::ptr_eq(&v.conn, conn)
+                && v.channel == channel
+                && !v.observe
+                && v.focus_updates
+                && v.desktop_group.is_some()
+                && v.visible
+        }) {
+            return;
+        }
+        for v in viewers {
+            v.focus_leader = Arc::ptr_eq(&v.conn, conn) && v.channel == channel;
+            if v.focus_leader && v.sized && !v.awaiting_size && v.size.0 > 0 && v.size.1 > 0 {
+                v.focus_grid = Some(v.size);
+            }
+        }
+    }
+
     /// Activity selects the device group and the viewer whose display facts count.
     fn touch(&self, st: &mut State, conn: &Arc<Conn>, channel: u32, f: impl FnOnce(&mut Viewer)) -> Option<u32> {
         let (id, v) = Self::viewer(st, conn, channel)?;
@@ -368,6 +413,9 @@ impl Core {
             return None;
         }
         v.active_at = Some(Instant::now());
+        if v.focus_leader && v.focused && v.visible && v.sized && !v.awaiting_size && v.size.0 > 0 && v.size.1 > 0 {
+            v.focus_grid = Some(v.size);
+        }
         self.apply_size(st, id);
         Some(id)
     }
@@ -377,6 +425,9 @@ impl Core {
         let id = if automatic {
             Self::viewer(&mut st, conn, channel).filter(|(_, v)| !v.observe).map(|(id, _)| id)
         } else {
+            if let Some((id, _)) = Self::viewer(&mut st, conn, channel) {
+                Self::claim_focus(&mut st, id, conn, channel);
+            }
             self.touch(&mut st, conn, channel, |_| {})
         };
         if let Some(id) = id {
@@ -463,9 +514,15 @@ impl Core {
     pub fn viewer_focus(&self, conn: &Arc<Conn>, channel: u32, focused: bool) {
         let mut st = self.lock();
         let id = if focused {
-            self.touch(&mut st, conn, channel, |_| {})
+            if let Some((id, _)) = Self::viewer(&mut st, conn, channel) {
+                Self::claim_focus(&mut st, id, conn, channel);
+            }
+            self.touch(&mut st, conn, channel, |v| v.focused = v.focus_updates)
         } else {
-            Self::viewer(&mut st, conn, channel).filter(|(_, v)| !v.observe).map(|(id, _)| id)
+            Self::viewer(&mut st, conn, channel).filter(|(_, v)| !v.observe).map(|(id, v)| {
+                v.focused = false;
+                id
+            })
         };
         if let Some(id) = id
             && st.screens.get(&id).is_some_and(|s| s.dec_mode(1004))
@@ -519,6 +576,8 @@ impl Core {
                 visible: viewer.visible,
                 size_eligible: selection.candidates.contains(&index),
                 visibility_updates: viewer.visibility_updates,
+                focus_updates: viewer.focus_updates,
+                focused: viewer.focused,
                 resize_notifications: viewer.resize_notifications,
                 observe: viewer.observe,
                 sized: viewer.sized,
@@ -541,7 +600,7 @@ impl Core {
         }
     }
 
-    /// Fit the selected desktop window group; display facts follow its sizing leader.
+    /// Apply the focused/sticky leader or fallback offer and its display facts.
     fn apply_size(&self, st: &mut State, id: u32) {
         let viewers = st.viewers.get(&id).map_or(&[][..], Vec::as_slice);
         let selection = select_sizing(viewers, self.settings().size_policy == crate::config::SizePolicy::Grouped);
@@ -638,6 +697,24 @@ struct SizeSelection {
 }
 
 fn select_sizing(viewers: &[Viewer], _grouped: bool) -> SizeSelection {
+    // The focus contract reserves sizing even before the first focus/measurement.
+    // No legacy/mobile fallback may resize a desktop that has negotiated it.
+    if viewers.iter().any(|v| !v.observe && v.focus_updates && v.desktop_group.is_some()) {
+        let candidates: Vec<usize> = viewers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, v)| {
+                (!v.observe && v.focus_updates && v.focus_leader && v.focus_grid.is_some()).then_some(index)
+            })
+            .collect();
+        let leader = candidates.first().copied();
+        return SizeSelection {
+            size: leader.and_then(|index| viewers[index].focus_grid),
+            contributors: leader.into_iter().collect(),
+            candidates,
+            leader,
+        };
+    }
     let awaiting_size = viewers.iter().any(|v| !v.observe && v.visible && v.awaiting_size);
     // A measured visible desktop owns the sizing device. Phone and legacy
     // viewers are fallback leaders only until such a desktop is available.

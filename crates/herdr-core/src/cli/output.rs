@@ -263,8 +263,12 @@ pub(super) fn viewers(r: &Value) -> String {
         let pid = v["peer_pid"].as_u64().map(|pid| format!(" pid={pid}")).unwrap_or_default();
         let visibility = if v["visible"] == true { "visible" } else { "hidden" };
         let eligibility = if v["size_eligible"] == true { "eligible" } else { "excluded" };
-        let capabilities =
-            format!("vis={} resize={}", v["visibility_updates"] == true, v["resize_notifications"] == true);
+        let capabilities = format!(
+            "vis={} resize={} focus={}",
+            v["visibility_updates"] == true,
+            v["resize_notifications"] == true,
+            v["focus_updates"] == true
+        );
         let state = if v["awaiting_size"] == true {
             "awaiting-size"
         } else if v["sized"] == true {
@@ -279,8 +283,11 @@ pub(super) fn viewers(r: &Value) -> String {
         if v["leader"] == true {
             roles.push("leader");
         }
-        if v["contributes_to_grid"] == true && v["leader"] != true {
-            roles.push("group-min");
+        if v["focused"] == true {
+            roles.push("focused");
+        }
+        if v["leader"] == true && v["focus_updates"] == true && (v["focused"] != true || v["visible"] != true) {
+            roles.push("sticky");
         }
         let group = v["desktop_group"].as_object().map_or_else(String::new, |g| {
             format!(" group={}/{}", g["line"].as_str().unwrap_or("?"), g["group"].as_str().unwrap_or("?"))
@@ -353,38 +360,6 @@ pub(super) fn describe(t: &Value) -> String {
     description
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn viewers_output_reports_both_negotiated_capabilities() {
-        let output = viewers(&serde_json::json!({
-            "terminal":"t1",
-            "current_grid":{"cols":80,"rows":24},
-            "selected_grid":{"cols":80,"rows":24},
-            "leader":{"connection_id":3,"channel":1},
-            "viewers":[{
-                "identity":{"connection_id":3,"channel":1},
-                "origin":"local_desktop",
-                "peer_pid":42,
-                "visible":true,
-                "size_eligible":true,
-                "sized":true,
-                "awaiting_size":false,
-                "visibility_updates":true,
-                "resize_notifications":true,
-                "offered":{"cols":80,"rows":24},
-                "active_ms_ago":1,
-                "leader":true,
-                "contributes_to_grid":true
-            }]
-        }));
-        assert!(output.contains("vis=true resize=true"));
-        assert!(output.contains("c3/ch1  local desktop pid=42"));
-    }
-}
-
 /// An exec's output as the program wrote it, then its exit code as ours.
 pub(super) fn exec_out(r: &Value) -> ! {
     use std::io::Write;
@@ -406,4 +381,39 @@ pub(super) fn exec_out(r: &Value) -> ! {
     };
     let _ = err.flush();
     std::process::exit(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewers_output_reports_negotiated_capabilities_and_sticky_focus() {
+        let output = viewers(&serde_json::json!({
+            "terminal":"t1",
+            "current_grid":{"cols":80,"rows":24},
+            "selected_grid":{"cols":80,"rows":24},
+            "leader":{"connection_id":3,"channel":1},
+            "viewers":[{
+                "identity":{"connection_id":3,"channel":1},
+                "origin":"local_desktop",
+                "peer_pid":42,
+                "visible":true,
+                "size_eligible":true,
+                "sized":true,
+                "awaiting_size":false,
+                "visibility_updates":true,
+                "focus_updates":true,
+                "focused":false,
+                "resize_notifications":true,
+                "offered":{"cols":80,"rows":24},
+                "active_ms_ago":1,
+                "leader":true,
+                "contributes_to_grid":true
+            }]
+        }));
+        assert!(output.contains("vis=true resize=true focus=true"));
+        assert!(output.contains("leader,sticky"));
+        assert!(output.contains("c3/ch1  local desktop pid=42"));
+    }
 }

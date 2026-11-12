@@ -76,8 +76,20 @@ fn remote_inline_redraw_uses_one_grid_across_resize_and_holder_reconnect() {
     let address = format!("far/{t}");
     let (mut app_a, conn_a) = desktop(&near);
     let (mut app_b, conn_b) = desktop(&near);
-    let mut a = Viewer::attach_on(conn_a, &address, 80, 16, json!({"resize_notifications": true}));
-    let mut b = Viewer::attach_on(conn_b, &address, 40, 12, json!({"resize_notifications": true}));
+    let mut a = Viewer::attach_on(
+        conn_a,
+        &address,
+        80,
+        16,
+        json!({"resize_notifications": true, "visibility_updates": true, "focus_updates": true, "focused": false}),
+    );
+    let mut b = Viewer::attach_on(
+        conn_b,
+        &address,
+        40,
+        12,
+        json!({"resize_notifications": true, "visibility_updates": true, "focus_updates": true, "focused": true}),
+    );
     let resize = |v: &mut Viewer, cols: u16, rows: u16| {
         v.conn.send(v.channel, wire::RESIZE, &[cols.to_le_bytes(), rows.to_le_bytes()].concat());
         v.conn.call("terminal.get", json!({"terminal": address}));
@@ -86,7 +98,7 @@ fn remote_inline_redraw_uses_one_grid_across_resize_and_holder_reconnect() {
     resize(&mut b, 40, 12);
 
     let check = |a: &mut Viewer, b: &mut Viewer, frame: &str, size: (u16, u16)| {
-        a.typed(format!("{frame}\n").as_bytes());
+        b.typed(format!("{frame}\n").as_bytes());
         a.shows(&format!("frame-{frame}"));
         b.shows(&format!("frame-{frame}"));
         let mut owner =
@@ -105,9 +117,11 @@ fn remote_inline_redraw_uses_one_grid_across_resize_and_holder_reconnect() {
     check(&mut a, &mut b, "one", (40, 12));
     resize(&mut b, 50, 10); // Both rows and columns change.
     check(&mut a, &mut b, "two", (50, 10));
-    // Focus must not cause repeated size arbitration or change either pane's offer.
+    // Focus transfers the single grid owner without changing either physical offer.
     for _ in 0..4 {
+        b.conn.send(b.channel, wire::FOCUS, &[0]);
         a.conn.send(a.channel, wire::FOCUS, &[1]);
+        a.conn.send(a.channel, wire::FOCUS, &[0]);
         b.conn.send(b.channel, wire::FOCUS, &[1]);
     }
     b.conn.call("terminal.get", json!({"terminal": address}));
