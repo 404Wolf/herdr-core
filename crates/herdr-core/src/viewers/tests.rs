@@ -76,6 +76,69 @@ fn forwarded_desktops_are_scoped_by_both_line_and_group() {
 }
 
 #[test]
+fn legacy_peer_channels_use_the_latest_visible_offer_without_pinning_the_group() {
+    let now = Instant::now();
+    let peer = Arc::new(Conn::default());
+    let mut vs: Vec<_> = (0..4)
+        .map(|channel| {
+            let mut v = viewer(&peer, (282, 207), Some(now));
+            v.channel = channel;
+            v.desktop_group = Some(("peer".into(), "old-app".into()));
+            v.visibility_updates = false;
+            v
+        })
+        .collect();
+    vs[3].size = (112, 42);
+    vs[3].active_at = Some(now - std::time::Duration::from_secs(326));
+    let selection = select_sizing(&vs, true);
+    assert_eq!(selection.size, Some((282, 207)));
+    assert_eq!(selection.contributors, vec![0, 1, 2]);
+    assert_eq!(selection.leader, Some(2));
+
+    let (core, id, root) = core_with_screen(112, 42);
+    {
+        let mut st = core.lock();
+        st.viewers.insert(id, vs);
+        core.apply_size(&mut st, id);
+    }
+    let snapshot = core.viewer_list(id, "t1".into());
+    assert_eq!(snapshot.current_grid, GridSize { cols: 282, rows: 207 });
+    assert_eq!(snapshot.selected_grid, Some(snapshot.current_grid));
+    assert_eq!(snapshot.leader.unwrap().channel, 2);
+    assert_eq!(snapshot.viewers.iter().filter(|v| v.contributes_to_grid).count(), 3);
+    assert!(!snapshot.viewers[3].contributes_to_grid);
+    vs = core.lock().viewers.remove(&id).unwrap();
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+
+    let other = Arc::new(Conn::default());
+    let mut distinct = viewer(&other, (200, 100), Some(now + std::time::Duration::from_secs(1)));
+    distinct.desktop_group = vs[0].desktop_group.clone();
+    distinct.visibility_updates = false;
+    vs.push(distinct);
+    assert_eq!(select_sizing(&vs, true).size, Some((200, 100)), "distinct visible viewers still fit");
+    assert_eq!(select_sizing(&vs, true).contributors, vec![0, 1, 2, 4]);
+    vs.pop();
+
+    vs[3].active_at = Some(now);
+    assert_eq!(select_sizing(&vs, true).size, Some((112, 42)), "ties do not supersede an offer");
+    vs[3].active_at = Some(now - std::time::Duration::from_secs(326));
+    let only = select_sizing(&vs[3..], true);
+    assert_eq!(only.size, Some((112, 42)), "age alone cannot expire the only offer");
+
+    vs[3].visibility_updates = true;
+    assert_eq!(select_sizing(&vs, true).size, Some((112, 42)), "negotiated visible panes retain their minimum");
+    vs[3].visible = false;
+    assert_eq!(select_sizing(&vs, true).size, Some((282, 207)));
+    vs[3].visible = true;
+    vs[3].visibility_updates = false;
+    vs[3].active_at = Some(now + std::time::Duration::from_secs(1));
+    assert_eq!(select_sizing(&vs, true).contributors, vec![3], "a fresh legacy offer becomes authoritative");
+    vs[3].visible = false;
+    assert_eq!(select_sizing(&vs, true).size, Some((282, 207)), "hidden offers cannot suppress visible ones");
+}
+
+#[test]
 fn phones_observers_resumed_and_placeholder_viewers_do_not_pin_desktop_size() {
     let now = Instant::now();
     let desktop = desktop_conn();

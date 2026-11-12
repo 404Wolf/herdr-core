@@ -140,6 +140,9 @@ grid; colors and cell facts follow the selected sizing leader.
 capabilities, offered and selected grids, and the exact sizing candidates.
 It is read-only and local to the current core; it never queries peers. Legacy
 viewers without visibility updates remain visible until their connection ends.
+Within a desktop group, a newer eligible legacy offer supersedes strictly older
+legacy channels on the same connection. Distinct connections and panes with
+negotiated visibility still share the minimum; age alone never expires an offer.
 Viewer identities are connection-lifetime IDs; a same-uid local socket PID is
 shown when available (it may be an `hc connect` helper, not the app process).
 The same desktop group is forwarded when attaching to another machine;

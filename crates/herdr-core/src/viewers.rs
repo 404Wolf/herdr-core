@@ -670,7 +670,19 @@ fn select_sizing(viewers: &[Viewer], grouped: bool) -> SizeSelection {
                     && !v.awaiting_size
                     && v.size.0 > 0
                     && v.size.1 > 0
-                    && v.active_at.is_some())
+                    && v.active_at.is_some()
+                    // Legacy channels cannot tell us which old tabs are hidden.
+                    // A strictly newer eligible legacy offer on the same peer
+                    // connection supersedes them, without expiring idle peers
+                    // or discarding explicitly visible negotiated panes.
+                    && (v.visibility_updates
+                        || !viewers.iter().any(|other| {
+                            desktop_sizer(other)
+                                && !other.visibility_updates
+                                && Arc::ptr_eq(&other.conn, &v.conn)
+                                && other.desktop_group == v.desktop_group
+                                && other.active_at > v.active_at
+                        })))
                 .then_some(index)
             })
             .collect();
