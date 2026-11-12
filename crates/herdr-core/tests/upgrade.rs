@@ -167,3 +167,69 @@ fn an_update_keeps_terminals_and_machines_running() {
     let list: Value = s.json(&["ls"]);
     assert!(list["terminals"].as_array().unwrap().iter().any(|t| t["address"] == live.as_str()), "{list}");
 }
+
+/// Unlike `install` above, this keeps the holder's original immutable path.
+/// Models a service manager delaying the selected successor beyond holder grace.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_immutable_old_holder_can_win_a_gapped_successor_launch() {
+    let (Some(old), Some(new)) = (std::env::var_os("HC_IMMUTABLE_OLD_BIN"), std::env::var_os("HC_SUCCESSOR_BIN"))
+    else {
+        eprintln!("skipped: set HC_IMMUTABLE_OLD_BIN and HC_SUCCESSOR_BIN to exact binaries");
+        return;
+    };
+    let old = std::fs::canonicalize(old).unwrap();
+    let new = std::fs::canonicalize(new).unwrap();
+    assert_ne!(old, new, "the immutable incumbent and successor must have distinct paths");
+    let mut s = Session::new();
+    s.bin = old.clone();
+    s.env.push(("HC_HOLDER_GRACE_MS".into(), "3000".into()));
+    s.env.push(("HC_UPGRADE_FIXTURE".into(), "retained-environment".into()));
+    let marker = s.root.join("output-during-handover");
+    let terminal = start(
+        &s,
+        &[
+            "sh",
+            "-c",
+            "echo ready-$HC_UPGRADE_FIXTURE; while ! test -e \"$1\"; do sleep 0.05; done; echo during-gap; while read line; do echo got-$line-$HC_UPGRADE_FIXTURE; done",
+            "fixture",
+            marker.to_str().unwrap(),
+        ],
+    );
+    says(&s, &terminal, "ready-retained-environment");
+    let before = s.json(&["server", "status"]);
+    let child = get(&s, &terminal)["pid"].clone();
+    let old_pid = before["pid"].as_i64().unwrap();
+    let child_stat = || {
+        let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).unwrap();
+        let fields: Vec<_> = stat.rsplit_once(") ").unwrap().1.split_whitespace().collect();
+        (fields[3].to_owned(), fields[19].to_owned()) // session and start ticks
+    };
+    let identity = child_stat();
+    let reply = s.connect().call(1, "server.restart", serde_json::json!({}));
+    assert!(reply.get("error").is_none(), "{reply}");
+    wait_until("incumbent exits after planned handover", || !pid_alive(old_pid));
+    std::fs::write(&marker, "").unwrap();
+    // No autostarting CLI during the gap: the immutable holder alone competes.
+    std::thread::sleep(std::time::Duration::from_millis(3500));
+    wait_until("the old holder starts its cached executable", || s.connect_ok());
+    let after = s.json(&["server", "status"]);
+    let winner = after["pid"].as_u64().unwrap();
+    assert_ne!(after["pid"], before["pid"]);
+    assert_eq!(std::fs::read_link(format!("/proc/{winner}/exe")).unwrap(), old);
+    // One delayed successor launch cannot take an already-owned core.lock.
+    let attempt = s.program(&new).arg("serve").output().unwrap();
+    assert!(attempt.status.success(), "{attempt:?}");
+    assert_eq!(s.json(&["server", "status"])["pid"], after["pid"]);
+    assert_eq!(after["holder"]["pid"], before["holder"]["pid"]);
+    assert_eq!(after["holder"]["instance"], before["holder"]["instance"]);
+    assert_eq!(get(&s, &terminal)["pid"], child);
+    assert_eq!(get(&s, &terminal)["address"], terminal);
+    assert_eq!(child_stat(), identity);
+    says(&s, &terminal, "during-gap");
+    s.json(&["send", &terminal, "after"]);
+    says(&s, &terminal, "got-after-retained-environment");
+    eprintln!(
+        "immutable restart race reproduced; old={old:?}, attempted successor={new:?}, same holder/child retained"
+    );
+}
