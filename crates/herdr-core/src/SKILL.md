@@ -128,21 +128,16 @@ still resize the terminal normally. `display: {fg, bg, cursor, cell}` (as in
 `terminal.attach`) likewise answers the program's color and cell-size queries
 from its start, before any viewer attaches.
 
-On Linux, local Herdr app windows share the smallest reported columns and
-rows while the desktop is active. A visible, measured desktop pane owns sizing
-before phones, SSH clients or other secondary viewers, regardless of which was
-most recently active. With grouped sizing, visible panes in the selected
-desktop group share the smaller grid. `size_policy = "latest"` selects the
-latest active desktop pane instead; secondary viewers control size only when no
-eligible desktop pane remains. Focus between desktop panes keeps the shared
-grid; colors and cell facts follow the selected sizing leader.
+A visible, measured desktop pane owns sizing before phones, SSH clients or
+other secondary viewers. The most recently active eligible desktop viewer's
+offer is the grid: other channels, including channels in its desktop group,
+never reduce it. Both `size_policy = "grouped"` (the default) and `"latest"`
+use this single-leader policy. Secondary viewers control size only when no
+eligible desktop pane remains. Colors and cell facts follow the same leader.
 `hc viewers <t>` reports attached viewers, negotiated resize/visibility
 capabilities, offered and selected grids, and the exact sizing candidates.
 It is read-only and local to the current core; it never queries peers. Legacy
 viewers without visibility updates remain visible until their connection ends.
-Within a desktop group, a newer eligible legacy offer supersedes strictly older
-legacy channels on the same connection. Distinct connections and panes with
-negotiated visibility still share the minimum; age alone never expires an offer.
 Viewer identities are connection-lifetime IDs; a same-uid local socket PID is
 shown when available (it may be an `hc connect` helper, not the app process).
 The same desktop group is forwarded when attaching to another machine;

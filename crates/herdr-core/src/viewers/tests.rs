@@ -34,7 +34,7 @@ fn viewer(conn: &Arc<Conn>, size: (u16, u16), active_at: Option<Instant>) -> Vie
 }
 
 #[test]
-fn desktop_windows_fit_both_axes_and_use_the_selected_leader_display() {
+fn desktop_windows_use_the_selected_leader_size_and_display() {
     let now = Instant::now();
     let a = desktop_conn();
     let b = desktop_conn();
@@ -43,20 +43,20 @@ fn desktop_windows_fit_both_axes_and_use_the_selected_leader_display() {
     vs[1].display.bg = Some("#eeeeee".into());
     vs[0].active_at = Some(now + std::time::Duration::from_secs(1));
     let (leader, size) = viewer_size(&vs, true);
-    assert_eq!(size, Some((80, 20)));
+    assert_eq!(size, Some((100, 20)));
     assert_eq!(leader.unwrap().display.bg.as_deref(), Some("#ffffff"));
     vs[1].active_at = Some(now + std::time::Duration::from_secs(2));
-    assert_eq!(viewer_size(&vs, true).1, Some((80, 20)));
+    assert_eq!(viewer_size(&vs, true).1, Some((80, 30)));
     assert_eq!(viewer_size(&vs, false).1, Some((80, 30)), "latest policy remains available");
     let phone = Arc::new(Conn::default());
     let mut mobile = viewer(&phone, (40, 10), Some(now + std::time::Duration::from_secs(3)));
     mobile.display.bg = Some("#000000".into());
     vs.push(mobile);
     let (leader, size) = viewer_size(&vs, true);
-    assert_eq!(size, Some((80, 20)), "phone activity cannot override visible desktop sizing");
+    assert_eq!(size, Some((80, 30)), "phone activity cannot override visible desktop sizing");
     assert_eq!(leader.unwrap().display.bg.as_deref(), Some("#eeeeee"), "display facts follow selected desktop leader");
     vs.pop();
-    assert_eq!(viewer_size(&vs, true).1, Some((80, 20)));
+    assert_eq!(viewer_size(&vs, true).1, Some((80, 30)));
     vs.pop();
     assert_eq!(viewer_size(&vs, true).1, Some((100, 20)), "detach releases the constraint");
 }
@@ -72,70 +72,41 @@ fn forwarded_desktops_are_scoped_by_both_line_and_group() {
     vs[1].desktop_group = Some(("line-a".into(), "another-desktop".into()));
     assert_eq!(viewer_size(&vs, true).1, Some((80, 30)), "one line can forward different desktops");
     vs[1].desktop_group = vs[0].desktop_group.clone();
-    assert_eq!(viewer_size(&vs, true).1, Some((80, 20)), "only an identical pair shares the grid");
+    assert_eq!(viewer_size(&vs, true).1, Some((80, 30)), "same-group followers do not constrain the selected offer");
 }
 
 #[test]
-fn legacy_peer_channels_use_the_latest_visible_offer_without_pinning_the_group() {
+fn selected_peer_channel_offer_is_the_grid_despite_old_smaller_channels() {
     let now = Instant::now();
     let peer = Arc::new(Conn::default());
-    let mut vs: Vec<_> = (0..4)
-        .map(|channel| {
-            let mut v = viewer(&peer, (282, 207), Some(now));
-            v.channel = channel;
+    let mut vs: Vec<_> = [(218, 78), (218, 81), (218, 168), (246, 186)]
+        .into_iter()
+        .enumerate()
+        .map(|(channel, size)| {
+            let mut v = viewer(&peer, size, Some(now - std::time::Duration::from_secs(62)));
+            v.channel = channel as u32;
             v.desktop_group = Some(("peer".into(), "old-app".into()));
-            v.visibility_updates = false;
             v
         })
         .collect();
-    vs[3].size = (112, 42);
-    vs[3].active_at = Some(now - std::time::Duration::from_secs(326));
+    vs[3].active_at = Some(now - std::time::Duration::from_secs(3));
     let selection = select_sizing(&vs, true);
-    assert_eq!(selection.size, Some((282, 207)));
-    assert_eq!(selection.contributors, vec![0, 1, 2]);
-    assert_eq!(selection.leader, Some(2));
-
-    let (core, id, root) = core_with_screen(112, 42);
+    assert_eq!(selection.leader, Some(3));
+    assert_eq!(selection.contributors, vec![3]);
+    assert_eq!(selection.size, Some((246, 186)));
+    let (core, id, root) = core_with_screen(218, 78);
     {
         let mut st = core.lock();
         st.viewers.insert(id, vs);
         core.apply_size(&mut st, id);
     }
     let snapshot = core.viewer_list(id, "t1".into());
-    assert_eq!(snapshot.current_grid, GridSize { cols: 282, rows: 207 });
+    assert_eq!(snapshot.current_grid, GridSize { cols: 246, rows: 186 });
     assert_eq!(snapshot.selected_grid, Some(snapshot.current_grid));
-    assert_eq!(snapshot.leader.unwrap().channel, 2);
-    assert_eq!(snapshot.viewers.iter().filter(|v| v.contributes_to_grid).count(), 3);
-    assert!(!snapshot.viewers[3].contributes_to_grid);
-    vs = core.lock().viewers.remove(&id).unwrap();
+    assert_eq!(snapshot.leader.unwrap().channel, 3);
+    assert_eq!(snapshot.viewers.iter().filter(|v| v.contributes_to_grid).count(), 1);
     drop(core);
     std::fs::remove_dir_all(root).unwrap();
-
-    let other = Arc::new(Conn::default());
-    let mut distinct = viewer(&other, (200, 100), Some(now + std::time::Duration::from_secs(1)));
-    distinct.desktop_group = vs[0].desktop_group.clone();
-    distinct.visibility_updates = false;
-    vs.push(distinct);
-    assert_eq!(select_sizing(&vs, true).size, Some((200, 100)), "distinct visible viewers still fit");
-    assert_eq!(select_sizing(&vs, true).contributors, vec![0, 1, 2, 4]);
-    vs.pop();
-
-    vs[3].active_at = Some(now);
-    assert_eq!(select_sizing(&vs, true).size, Some((112, 42)), "ties do not supersede an offer");
-    vs[3].active_at = Some(now - std::time::Duration::from_secs(326));
-    let only = select_sizing(&vs[3..], true);
-    assert_eq!(only.size, Some((112, 42)), "age alone cannot expire the only offer");
-
-    vs[3].visibility_updates = true;
-    assert_eq!(select_sizing(&vs, true).size, Some((112, 42)), "negotiated visible panes retain their minimum");
-    vs[3].visible = false;
-    assert_eq!(select_sizing(&vs, true).size, Some((282, 207)));
-    vs[3].visible = true;
-    vs[3].visibility_updates = false;
-    vs[3].active_at = Some(now + std::time::Duration::from_secs(1));
-    assert_eq!(select_sizing(&vs, true).contributors, vec![3], "a fresh legacy offer becomes authoritative");
-    vs[3].visible = false;
-    assert_eq!(select_sizing(&vs, true).size, Some((282, 207)), "hidden offers cannot suppress visible ones");
 }
 
 #[test]
@@ -162,9 +133,10 @@ fn phones_observers_resumed_and_placeholder_viewers_do_not_pin_desktop_size() {
     vs[1].sized = false;
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "hidden attach placeholders do not constrain");
     vs[1].sized = true;
+    vs[1].active_at = Some(now + std::time::Duration::from_secs(2));
     assert_eq!(viewer_size(&vs, true).1, Some((40, 10)));
     vs[1].active_at = Some(now - std::time::Duration::from_secs(3600));
-    assert_eq!(viewer_size(&vs, true).1, Some((40, 10)), "an idle visible window must still fit");
+    assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "an idle follower cannot shrink the leader");
     vs[1].active_at = Some(now);
     vs[1].size = (0, 0);
     assert_eq!(viewer_size(&vs, true).1, Some((100, 30)), "zero size does not constrain");
@@ -191,7 +163,7 @@ fn mobile_only_and_desktop_pending_fallbacks_remain_authoritative() {
 }
 
 #[test]
-fn grouped_size_uses_visible_min_and_visibility_restores_the_grid() {
+fn selected_visible_offer_and_visibility_restore_the_grid() {
     let now = Instant::now();
     let portrait = desktop_conn();
     let landscape = desktop_conn();
@@ -208,20 +180,24 @@ fn grouped_size_uses_visible_min_and_visibility_restores_the_grid() {
 }
 
 #[test]
-fn focus_and_idle_do_not_change_visibility_eligibility() {
+fn idle_visible_followers_do_not_constrain_the_active_offer() {
     let now = Instant::now();
     let large = desktop_conn();
     let small = desktop_conn();
     let mut vs = vec![viewer(&large, (218, 168), Some(now)), viewer(&small, (218, 74), Some(now))];
     vs[1].active_at = Some(now - std::time::Duration::from_secs(3600));
     assert!(vs[1].visible);
-    assert_eq!(viewer_size(&vs, true).1, Some((218, 74)), "an idle visible view still constrains");
+    assert_eq!(viewer_size(&vs, true).1, Some((218, 168)), "an idle visible follower cannot shrink the active offer");
 
     vs[1].active_at = None;
     assert_eq!(viewer_size(&vs, true).1, Some((218, 168)), "a returning viewer without a fresh size cannot constrain");
     vs[1].visible = true;
     vs[1].active_at = Some(now - std::time::Duration::from_secs(3600));
-    assert_eq!(viewer_size(&vs, true).1, Some((218, 74)), "visibility, not recency, admits the measured size");
+    assert_eq!(
+        viewer_size(&vs, true).1,
+        Some((218, 168)),
+        "an idle follower stays visible without contributing its grid"
+    );
 }
 
 fn core_with_screen(cols: u16, rows: u16) -> (Arc<Core>, u32, std::path::PathBuf) {
@@ -285,7 +261,7 @@ fn resumed_viewers_hold_the_inherited_grid_until_a_physical_size_arrives() {
         core.viewer_resize(&narrow, a, 120, 50);
         assert_eq!(grid(), (120, 50), "new physical offers again constrain both axes");
         core.viewer_focus(&wide, b, true);
-        assert_eq!(grid(), (120, 50), "focus must not cause a resize tug-of-war");
+        assert_eq!(grid(), (246, 91), "focus selects that viewer's own grid");
         drop(core);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -358,7 +334,7 @@ fn visibility_updates_recompute_the_grid_and_resumed_views_wait_for_measurement(
 }
 
 #[test]
-fn viewer_diagnostics_track_visibility_group_min_and_disconnect() {
+fn viewer_diagnostics_track_visibility_leader_and_disconnect() {
     let (core, id, root) = core_with_screen(100, 40);
     let wide = desktop_conn();
     let narrow = desktop_conn();
@@ -393,7 +369,7 @@ fn viewer_diagnostics_track_visibility_group_min_and_disconnect() {
     let b_info = snapshot.viewers.iter().find(|v| v.identity == b_identity).unwrap();
     let mobile_info = snapshot.viewers.iter().find(|v| v.identity == mobile_identity).unwrap();
     assert!(snapshot.leader == Some(b_info.identity));
-    assert!(a_info.size_eligible && a_info.contributes_to_grid);
+    assert!(a_info.size_eligible && !a_info.contributes_to_grid);
     assert!(b_info.size_eligible && b_info.leader && b_info.contributes_to_grid);
     assert!(mobile_info.visible && !mobile_info.size_eligible && !mobile_info.contributes_to_grid);
     assert_eq!(mobile_info.origin, ViewerOrigin::LocalClient);
@@ -681,10 +657,11 @@ fn larger_desktop_viewers_keep_only_the_shared_scrolling_grid() {
     }
     tall_screen.resize(20, 12);
     tall_screen.write(b"\x1b[11;1HSTALE AFTER RESIZE");
-    core.viewer_resize(&tall, a, 20, 12); // The shared PTY stays 20x4.
+    core.viewer_resize(&tall, a, 20, 12); // This activity now selects the tall viewer.
     core.prepare_repaints(&tall);
     drain(&tall, a, &mut tall_screen);
-    assert!(tall_screen.screen_rows()[4..].iter().all(|r| r.trim().is_empty()));
+    assert_eq!(core.lock().screens[&id].size(), (20, 12));
+    assert_eq!(tall_screen.screen_rows(), core.lock().screens[&id].screen_rows());
     drop(core);
     std::fs::remove_dir_all(root).unwrap();
 }

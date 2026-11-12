@@ -637,7 +637,7 @@ struct SizeSelection {
     size: Option<(u16, u16)>,
 }
 
-fn select_sizing(viewers: &[Viewer], grouped: bool) -> SizeSelection {
+fn select_sizing(viewers: &[Viewer], _grouped: bool) -> SizeSelection {
     let awaiting_size = viewers.iter().any(|v| !v.observe && v.visible && v.awaiting_size);
     // A measured visible desktop owns the sizing device. Phone and legacy
     // viewers are fallback leaders only until such a desktop is available.
@@ -658,43 +658,8 @@ fn select_sizing(viewers: &[Viewer], grouped: bool) -> SizeSelection {
         return SizeSelection { candidates, ..Default::default() };
     };
     let selected = &viewers[leader];
-    let (contributors, size) = if grouped && selected.desktop_group.is_some() {
-        let contributors: Vec<usize> = viewers
-            .iter()
-            .enumerate()
-            .filter_map(|(index, v)| {
-                (!v.observe
-                    && v.desktop_group == selected.desktop_group
-                    && v.visible
-                    && v.sized
-                    && !v.awaiting_size
-                    && v.size.0 > 0
-                    && v.size.1 > 0
-                    && v.active_at.is_some()
-                    // Legacy channels cannot tell us which old tabs are hidden.
-                    // A strictly newer eligible legacy offer on the same peer
-                    // connection supersedes them, without expiring idle peers
-                    // or discarding explicitly visible negotiated panes.
-                    && (v.visibility_updates
-                        || !viewers.iter().any(|other| {
-                            desktop_sizer(other)
-                                && !other.visibility_updates
-                                && Arc::ptr_eq(&other.conn, &v.conn)
-                                && other.desktop_group == v.desktop_group
-                                && other.active_at > v.active_at
-                        })))
-                .then_some(index)
-            })
-            .collect();
-        let size = contributors
-            .iter()
-            .map(|index| viewers[*index].size)
-            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
-            .unwrap_or(selected.size);
-        (if contributors.is_empty() { vec![leader] } else { contributors }, size)
-    } else {
-        (vec![leader], selected.size)
-    };
+    let contributors = vec![leader];
+    let size = selected.size;
     SizeSelection { candidates, leader: Some(leader), contributors, size: Some(size) }
 }
 
