@@ -34,17 +34,37 @@ pub fn push(t: &mut Terminal, from: Option<String>, text: &str, kind: &str, ts: 
     (message, t.inbox.len())
 }
 
-/// How many inbox-only message keys a terminal remembers.
-pub const KEPT_KEYS: usize = 256;
+/// How long a terminal remembers an inbox-only message's key, whatever
+/// else is sent meanwhile: a sender may retry a send with a lost answer
+/// for up to this long (advertised as `queue_keys_kept_ms` in
+/// `server.status`). Kept with the registry, so across restarts too.
+pub const KEYS_KEPT_MS: u64 = 60 * 60 * 1000;
+/// A guard against a runaway sender: at most this many keys per terminal.
+/// Far above any real use (diffd sends one per pause in a review), and
+/// the oldest go first, so a key goes early only past this many sends an hour.
+pub const MAX_KEYS: usize = 10_000;
 /// The longest key, in bytes.
 pub const MAX_KEY: usize = 128;
 
-/// Remembers `key` as queued on `t`, keeping the newest [`KEPT_KEYS`]. Kept
-/// with the registry, so a restarted core still knows them.
-pub fn remember_key(t: &mut Terminal, key: &str) {
-    t.queued_keys.push(key.to_string());
-    let over = t.queued_keys.len().saturating_sub(KEPT_KEYS);
-    t.queued_keys.drain(..over);
+/// Drops keys older than [`KEYS_KEPT_MS`] (and past [`MAX_KEYS`], the
+/// oldest). They're kept oldest first, so only the front goes.
+pub fn forget_old_keys(t: &mut Terminal, now: u64) {
+    let since = now.saturating_sub(KEYS_KEPT_MS);
+    while t.queued_keys.front().is_some_and(|(_, at)| *at < since) || t.queued_keys.len() > MAX_KEYS {
+        t.queued_keys.pop_front();
+    }
+}
+
+/// Whether `key` was queued on `t` within [`KEYS_KEPT_MS`].
+pub fn key_queued(t: &Terminal, key: &str, now: u64) -> bool {
+    let since = now.saturating_sub(KEYS_KEPT_MS);
+    t.queued_keys.iter().any(|(k, at)| k == key && *at >= since)
+}
+
+/// Remembers `key` as queued on `t` at `now`.
+pub fn remember_key(t: &mut Terminal, key: &str, now: u64) {
+    t.queued_keys.push_back((key.to_string(), now));
+    forget_old_keys(t, now);
 }
 
 /// Drops every message up to and including `id`; returns how many are left.
@@ -88,14 +108,15 @@ impl Core {
         let queued = {
             let mut st = self.lock();
             let open = self.inbox_open(&st, id);
-            let known = |t: &Terminal| key.is_some_and(|key| t.queued_keys.iter().any(|k| k == key));
+            let now = now_ms();
+            let known = |t: &Terminal| key.is_some_and(|key| key_queued(t, key, now));
             let found = st.reg.terminals.get(&id).filter(|t| known(t) || (open && t.is_live()));
             match found.map(|t| (crate::input::state_word(t), t.turn, t.reported, t.inbox.len(), known(t))) {
                 Some((word, turn, reported, waiting, true)) => Some((word, turn, reported, waiting, true)),
                 Some((word, turn, reported, _, false)) => {
                     crate::input::check_status(id, word.as_deref(), only_if)?;
                     if let Some(key) = key {
-                        remember_key(st.reg.terminals.get_mut(&id).expect("found above"), key);
+                        remember_key(st.reg.terminals.get_mut(&id).expect("found above"), key, now);
                     }
                     let waiting = self.queue_message(&mut st, id, from, text, "send");
                     Some((word, turn, reported, waiting, false))
@@ -129,16 +150,27 @@ mod tests {
     use crate::terminals::{NewTerminal, Registry};
 
     #[test]
-    fn a_terminal_keeps_the_newest_keys() {
+    fn a_terminal_keeps_keys_for_an_hour_however_many_follow() {
         let mut r = Registry::default();
         let id = r.create(NewTerminal { argv: vec!["x".into()], ..Default::default() }, 0).unwrap();
         let t = r.terminals.get_mut(&id).unwrap();
-        for n in 0..KEPT_KEYS + 10 {
-            remember_key(t, &format!("k{n}"));
+        let start = 1_000_000_000;
+        remember_key(t, "first", start);
+        // Many more keys within the hour don't push it out.
+        for n in 0..1000 {
+            remember_key(t, &format!("k{n}"), start + n);
         }
-        assert_eq!(t.queued_keys.len(), KEPT_KEYS);
-        assert_eq!(t.queued_keys.first().map(String::as_str), Some("k10"));
-        assert_eq!(t.queued_keys.last(), Some(&format!("k{}", KEPT_KEYS + 9)));
+        let almost = start + KEYS_KEPT_MS;
+        assert!(key_queued(t, "first", almost), "still known at the end of its hour");
+        assert!(!key_queued(t, "first", almost + 1), "forgotten after it");
+        remember_key(t, "late", almost + 1);
+        assert!(!t.queued_keys.iter().any(|(k, _)| k == "first"));
+        assert!(key_queued(t, "late", almost + 1));
+        // A runaway sender is capped, oldest first.
+        for n in 0..MAX_KEYS as u64 + 5 {
+            remember_key(t, &format!("r{n}"), almost + 2);
+        }
+        assert_eq!(t.queued_keys.len(), MAX_KEYS);
         // Kept with the terminal, so a restarted core still knows them.
         let saved: Terminal = serde_json::from_value(serde_json::to_value(&*t).unwrap()).unwrap();
         assert_eq!(saved.queued_keys, t.queued_keys);

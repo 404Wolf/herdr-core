@@ -144,10 +144,11 @@ pub struct Terminal {
     /// The id of the last message queued for it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub last_message: u64,
-    /// The keys of the last inbox-only messages queued for it, newest last
-    /// (see `inbox::remember_key`): the same key again isn't queued twice.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub queued_keys: Vec<String>,
+    /// The keys of inbox-only messages queued for it in the last
+    /// `inbox::KEYS_KEPT_MS`, with when, oldest first (see
+    /// `inbox::remember_key`): the same key again isn't queued twice.
+    #[serde(default, skip_serializing_if = "std::collections::VecDeque::is_empty")]
+    pub queued_keys: std::collections::VecDeque<(String, u64)>,
 }
 
 impl Terminal {
@@ -315,7 +316,7 @@ impl Registry {
                 afar: Default::default(),
                 inbox: Vec::new(),
                 last_message: 0,
-                queued_keys: Vec::new(),
+                queued_keys: Default::default(),
                 template: new.template.map(|t| t.name),
                 first_message: None,
                 holder: None,

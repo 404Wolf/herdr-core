@@ -13,8 +13,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const GENERATION: u32 = 1;
-pub const FEATURES: &[&str] =
-    &["framed", "attach", "events", "status", "shell", "resize_notifications", "automatic_input", "queue"];
+pub const FEATURES: &[&str] = &[
+    "framed",
+    "attach",
+    "events",
+    "status",
+    "shell",
+    "resize_notifications",
+    "automatic_input",
+    "queue",
+    "queue-keyed",
+];
 pub const FINISHED_LINES: usize = 1000;
 /// A terminal's identity: fixed at start from whoever starts it.
 pub const IDENTITY_VARS: &[&str] = &["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"];
@@ -101,8 +110,8 @@ methods! { Ctx<'_>;
         "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "drafting", "invalid_params", "config"];
     "terminal.queue" => terminal_queue, QueueParams => SendResult,
-        "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. This machine's terminals only.",
-        errors ["not_found", "machine_unknown", "not_following", "invalid_params"];
+        "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal within `queue_keys_kept_ms` (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. With `core`, only that core queues it (`other_core` otherwise). This machine's terminals only.",
+        errors ["not_found", "machine_unknown", "not_following", "other_core", "invalid_params"];
     "terminal.inbox" => terminal_inbox, InboxParams => InboxResult,
         "The messages waiting in a terminal's inbox. With `follow` (only the terminal itself, as caller): new ones then arrive as `message` events on this connection, and while it stays open, sends and notes to the terminal are queued here instead of typed. Messages stay until acknowledged.",
         errors ["not_found", "invalid_params", "needs_target"];
@@ -224,6 +233,7 @@ async fn server_status(core: Ctx<'_>, _: Empty) -> Result<StatusResult, RpcError
         finished: st.reg.terminals.len() - live,
         installed_by: crate::client::installed_by().map(String::from),
         features: FEATURES.iter().map(|f| f.to_string()).collect(),
+        queue_keys_kept_ms: crate::inbox::KEYS_KEPT_MS,
     })
 }
 
@@ -462,6 +472,14 @@ async fn terminal_queue(core: Ctx<'_>, p: QueueParams) -> Result<SendResult, Rpc
     if p.key.as_ref().is_some_and(|k| k.is_empty() || k.len() > crate::inbox::MAX_KEY) {
         return Err(RpcError::invalid_params(format!("a key is 1 to {} bytes", crate::inbox::MAX_KEY)));
     }
+    // A key means something only to the core that queued it.
+    if let Some(expected) = p.core.as_deref().filter(|c| *c != core.info.id) {
+        return Err(RpcError::new(
+            "other_core",
+            format!("this is core {}, not {expected}", core.info.id),
+            "nothing was queued; the terminal you meant is on a core that's gone",
+        ));
+    }
     let send = SendParams {
         terminal: p.terminal,
         text: p.text,
@@ -471,6 +489,7 @@ async fn terminal_queue(core: Ctx<'_>, p: QueueParams) -> Result<SendResult, Rpc
         timeout: None,
         inbox_only: true,
         key: p.key,
+        core: None,
         caller: p.caller,
     };
     terminal_send(core, send).await

@@ -238,7 +238,14 @@ fn an_inbox_only_send_with_a_key_is_queued_once_across_lost_answers_and_restarts
     let agent = run(&s, &[], echo);
     wait_until("reported", || get(&s, &sender)["reported"] == true && get(&s, &agent)["reported"] == true);
     let follower = Follower::start(&s, &agent, &[]);
-    let send = |key: &str, text: &str| hc_in(&s, &sender, &["send", "--inbox-only", "--key", key, &agent, text]);
+    // The core says it keeps keys, and for how long: a sender retries within that.
+    let status = s.json(&["server", "status"]);
+    assert!(status["features"].as_array().unwrap().iter().any(|f| f == "queue-keyed"), "{status}");
+    assert_eq!(status["queue_keys_kept_ms"], 60 * 60 * 1000, "{status}");
+    let core = status["core"]["id"].as_str().unwrap().to_string();
+    let send = |key: &str, text: &str| {
+        hc_in(&s, &sender, &["send", "--inbox-only", "--core", &core, "--key", key, &agent, text])
+    };
 
     let first = send("diffd-k1", "review it");
     assert_eq!((first["via"].as_str(), first.get("repeated")), (Some("inbox"), None), "{first}");
@@ -265,6 +272,9 @@ fn an_inbox_only_send_with_a_key_is_queued_once_across_lost_answers_and_restarts
     assert_eq!(send("diffd-k2", "and this")["repeated"].as_bool(), Some(true));
     let (_, err) = s.err(&["send", "--inbox-only", "--key", "diffd-k3", &agent, "new"]);
     assert_eq!(err["error"]["kind"], "not_following", "{err}");
+    // A key belongs to the core that queued it: another refuses.
+    let (_, err) = s.err(&["send", "--inbox-only", "--core", "another-core", "--key", "diffd-k1", &agent, "x"]);
+    assert_eq!(err["error"]["kind"], "other_core", "{err}");
     // Keys are 1 to 128 bytes; --key needs --inbox-only.
     let (_, err) = s.err(&["send", "--inbox-only", "--key", &"k".repeat(129), &agent, "x"]);
     assert_eq!(err["error"]["kind"], "invalid_params", "{err}");

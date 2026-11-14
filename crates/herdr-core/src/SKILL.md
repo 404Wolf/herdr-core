@@ -128,7 +128,9 @@ from, text, kind, ts}` (`kind` send or note), instead of typed; `hc inbox ack
 the next follower. `send` reports `via: inbox` or `via: typed`; `send
 --inbox-only` (API `terminal.queue`) never types: with nobody following it
 fails with `not_following`. Give it `--key <k>` to make a retry safe: a key
-already queued on that terminal isn't queued again (`repeated: true`).
+queued on that terminal in the last hour (`server status`'s
+`queue_keys_kept_ms`) isn't queued again (`repeated: true`); `--core <id>`
+makes sure it's that core.
 
 ## Run programs
 

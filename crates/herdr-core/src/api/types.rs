@@ -149,8 +149,12 @@ pub struct StatusResult {
     /// Null for a replaceable plain install.
     pub installed_by: Option<String>,
     /// What this core can do, as `hello` says (e.g. `queue`: it takes
-    /// `terminal.queue`), so a client can choose before it relies on one.
+    /// `terminal.queue`; `queue-keyed`: with keys), so a client can choose
+    /// before it relies on one.
     pub features: Vec<String>,
+    /// How long a terminal remembers a `terminal.queue` key: a sender may
+    /// retry a send whose answer it lost for up to this long.
+    pub queue_keys_kept_ms: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -497,6 +501,11 @@ pub struct SendParams {
     #[arg(long, requires = "inbox_only")]
     #[serde(skip)]
     pub key: Option<String>,
+    /// With --inbox-only: only if this core (its id, from `server status`)
+    /// is the one running; another refuses (`other_core`).
+    #[arg(long, requires = "inbox_only")]
+    #[serde(skip)]
+    pub core: Option<String>,
     /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent), so a
     /// bare wait from the same caller waits for this send's turn.
     #[arg(skip)]
@@ -513,6 +522,9 @@ pub struct QueueParams {
     /// Names this message (1 to 128 bytes): with a key already queued on
     /// that terminal, it isn't queued again.
     pub key: Option<String>,
+    /// The core id the sender means (`server status`): another core refuses
+    /// (`other_core`), since the terminal and its keys are that core's.
+    pub core: Option<String>,
     /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent).
     pub caller: Option<String>,
 }

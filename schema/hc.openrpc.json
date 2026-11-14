@@ -1086,7 +1086,7 @@
             "$ref": "#/components/schemas/CoreInfo"
           },
           "features": {
-            "description": "What this core can do, as `hello` says (e.g. `queue`: it takes\n`terminal.queue`), so a client can choose before it relies on one.",
+            "description": "What this core can do, as `hello` says (e.g. `queue`: it takes\n`terminal.queue`; `queue-keyed`: with keys), so a client can choose\nbefore it relies on one.",
             "items": {
               "type": "string"
             },
@@ -1132,6 +1132,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "queue_keys_kept_ms": {
+            "description": "How long a terminal remembers a `terminal.queue` key: a sender may\nretry a send whose answer it lost for up to this long.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "uptime_ms": {
             "format": "uint64",
             "minimum": 0,
@@ -1149,7 +1155,8 @@
           "holders",
           "live",
           "finished",
-          "features"
+          "features",
+          "queue_keys_kept_ms"
         ],
         "type": "object"
       },
@@ -2655,7 +2662,7 @@
       }
     },
     {
-      "description": "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. This machine's terminals only.",
+      "description": "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal within `queue_keys_kept_ms` (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. With `core`, only that core queues it (`other_core` otherwise). This machine's terminals only.",
       "errors": [
         {
           "code": -32000,
@@ -2679,6 +2686,13 @@
           "message": "not_following"
         },
         {
+          "code": -32000,
+          "data": {
+            "kind": "other_core"
+          },
+          "message": "other_core"
+        },
+        {
           "code": -32602,
           "data": {
             "kind": "invalid_params"
@@ -2695,6 +2709,18 @@
           "required": false,
           "schema": {
             "description": "Who is sending (`HC_TERMINAL_ID`, else the calling process's parent).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "The core id the sender means (`server status`): another core refuses\n(`other_core`), since the terminal and its keys are that core's.",
+          "name": "core",
+          "required": false,
+          "schema": {
+            "description": "The core id the sender means (`server status`): another core refuses\n(`other_core`), since the terminal and its keys are that core's.",
             "type": [
               "string",
               "null"
