@@ -677,6 +677,33 @@
         ],
         "type": "object"
       },
+      "Prompt": {
+        "description": "The latest observed submitted input, including a steer of a working turn.",
+        "properties": {
+          "by": {
+            "description": "`human` for a viewer's Enter, `agent` for a send or inbox enqueue.",
+            "type": "string"
+          },
+          "from": {
+            "description": "The sending terminal address, when known; absent for human input.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ms": {
+            "description": "When the submission was delivered or enqueued, ms since the epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "by",
+          "ms"
+        ],
+        "type": "object"
+      },
       "PutResult": {
         "properties": {
           "bytes": {
@@ -1358,6 +1385,17 @@
               "integer",
               "null"
             ]
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Prompt"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Latest observed submission; absent when none is known, not inferred from status."
           },
           "reason": {
             "description": "Why its program ended or is pending (`spawn_pending` means its initial\nspawn timed out, but the holder may still be starting it):\nexited, killed, server_stop, host_shutdown (Windows\nis ending the session, including logout), signaled (a kept program\ndied by signal without an exit code), holder_lost (its holder\ndied), stopped_by_restart (nothing ran it any more after a restart).",

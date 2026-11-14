@@ -4,7 +4,7 @@
 use crate::holder_proto as proto;
 use crate::rpc::RpcError;
 use crate::runtime::{Core, State};
-use crate::terminals::Terminal;
+use crate::terminals::{Prompt, Terminal};
 use std::time::{Duration, Instant};
 
 /// Pause between the paste and Enter, so the program sees them apart.
@@ -30,12 +30,24 @@ pub struct Gate {
     held_human: bool,
     /// A person typed text they haven't sent or cleared yet (see `drafting`).
     draft: bool,
+    /// Only for submission attribution; the quiet/draft gate keeps its existing rules.
+    submitted: bool,
+    in_paste: bool,
+    key_tail: Vec<u8>,
 }
 
 impl Gate {
     /// A person pressed keys while an agent's input was going in.
     pub fn has_held(&self) -> bool {
         self.held_human
+    }
+
+    /// Attribute a human Enter only when its bytes can reach the program.
+    pub fn take_prompt(&mut self) -> Option<Prompt> {
+        if self.busy || !std::mem::take(&mut self.submitted) {
+            return None;
+        }
+        Some(Prompt { by: "human".into(), from: None, ms: crate::runtime::now_ms() })
     }
 
     /// Starts or ends an agent's input; ending returns the viewer bytes held meanwhile.
@@ -55,6 +67,9 @@ impl Gate {
         if human {
             self.last_human = Some(Instant::now());
             self.draft = drafting(self.draft, bytes);
+            if self.submission(bytes) {
+                self.submitted = true;
+            }
         }
         if self.busy {
             self.held_human |= human && !bytes.is_empty();
@@ -64,6 +79,52 @@ impl Gate {
             bytes.to_vec()
         }
     }
+
+    /// Enter outside a bracketed paste, including a CSI u key split across frames.
+    fn submission(&mut self, input: &[u8]) -> bool {
+        let mut bytes = std::mem::take(&mut self.key_tail);
+        bytes.extend_from_slice(input);
+        let mut submitted = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\r' if !self.in_paste => submitted = true,
+                0x1b => {
+                    let rest = &bytes[i..];
+                    let (len, csi) = escape(rest);
+                    let complete = match rest.get(1) {
+                        Some(b'[') => csi.is_some() || (rest.starts_with(b"\x1b[M") && rest.len() >= 6),
+                        Some(b']') => rest[..len].ends_with(b"\x07") || rest[..len].ends_with(b"\x1b\\"),
+                        Some(b'O') => rest.len() >= 3,
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if !complete {
+                        self.key_tail.extend_from_slice(rest);
+                        break;
+                    }
+                    match csi {
+                        Some((b"200", b'~')) => self.in_paste = true,
+                        Some((b"201", b'~')) => self.in_paste = false,
+                        Some((params, b'u')) if !self.in_paste => submitted |= enter_key(params),
+                        _ => {}
+                    }
+                    i += len;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        submitted
+    }
+}
+
+fn enter_key(params: &[u8]) -> bool {
+    let mut parts = std::str::from_utf8(params).unwrap_or("").split(';');
+    let key = parts.next().unwrap_or("").split(':').next().unwrap_or("");
+    let mut modifiers = parts.next().unwrap_or("1").split(':');
+    key == "13" && modifiers.next() == Some("1") && modifiers.next() != Some("3")
 }
 
 /// Whether a person's keys leave a draft in the program's input: text starts
@@ -139,6 +200,7 @@ fn draft_max() -> Duration {
 pub enum Step {
     FirstTask(Vec<u8>),
     Write(Vec<u8>),
+    Submit(Vec<u8>, Option<String>),
     Pause(Duration),
 }
 
@@ -269,12 +331,26 @@ impl Core {
                         link.input(id, &bytes);
                     }
                 }
+                Step::Submit(bytes, from) => {
+                    let mut st = self.lock();
+                    if st.link(id).is_some() {
+                        st.reg.terminals.get_mut(&id).expect("live terminal").prompt =
+                            Some(Prompt { by: "agent".into(), from, ms: crate::runtime::now_ms() });
+                        self.save(&st);
+                        st.link(id).expect("delivery link").input(id, &bytes);
+                    }
+                }
                 Step::Pause(d) => tokio::time::sleep(d).await,
             }
         }
         let mut st = self.lock();
         let gate = st.gates.entry(id).or_default();
         let held = gate.set_busy(false);
+        let prompt = gate.take_prompt();
+        if st.link(id).is_some() && let Some(prompt) = prompt {
+            st.reg.terminals.get_mut(&id).expect("live terminal").prompt = Some(prompt);
+            self.save(&st);
+        }
         if let Some(link) = st.link(id) {
             link.input(id, &held);
         }
@@ -283,12 +359,19 @@ impl Core {
 
     /// Paste + Enter, after a person has paused typing. Refuses a blocked
     /// program (typing would answer its dialog) unless `force`.
-    pub async fn send(&self, id: u32, text: &str, force: bool, only_if: Option<&str>) -> Result<Sent, RpcError> {
-        self.send_message(id, text, force, only_if, false).await
+    pub async fn send(
+        &self,
+        id: u32,
+        text: &str,
+        force: bool,
+        only_if: Option<&str>,
+        from: Option<&str>,
+    ) -> Result<Sent, RpcError> {
+        self.send_message(id, text, force, only_if, false, from).await
     }
 
-    pub(crate) async fn send_first_task(&self, id: u32, text: &str) -> Result<Sent, RpcError> {
-        self.send_message(id, text, false, None, true).await
+    pub(crate) async fn send_first_task(&self, id: u32, text: &str, from: Option<&str>) -> Result<Sent, RpcError> {
+        self.send_message(id, text, false, None, true, from).await
     }
 
     async fn send_message(
@@ -298,6 +381,7 @@ impl Core {
         force: bool,
         only_if: Option<&str>,
         first_task: bool,
+        from: Option<&str>,
     ) -> Result<Sent, RpcError> {
         if let Some(t) = self.lock().reg.terminals.get(&id) {
             t.check_program()?;
@@ -330,7 +414,8 @@ impl Core {
                 let gap = t.paste_gap_ms.map_or(PASTE_GAP, Duration::from_millis);
                 let bytes = paste(screen.dec_mode(2004), text);
                 let paste = if first_task { Step::FirstTask(bytes) } else { Step::Write(bytes) };
-                let steps = vec![paste, Step::Pause(gap), Step::Write(submit)];
+                let from = from.filter(|c| crate::terminals::parse_id(c).is_some() || c.contains('/')).map(String::from);
+                let steps = vec![paste, Step::Pause(gap), Step::Submit(submit, from)];
                 Ok(((word, t.turn, t.reported), steps))
             })
             .await?;
@@ -457,6 +542,36 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_human_enter_submits_and_held_submissions_wait_for_delivery() {
+        let mut gate = Gate::default();
+        for bytes in [b"draft".as_slice(), b"\x1b[A", b"\x03", b"\x15", b"\x1b[13;2u", b"\x1b[13;1:3u"] {
+            gate.viewer(bytes, true);
+            assert!(gate.take_prompt().is_none(), "{bytes:?}");
+        }
+        let human = gate.last_human;
+        gate.viewer(b"\r", false);
+        assert!(gate.take_prompt().is_none());
+        assert_eq!(gate.last_human, human, "automatic input leaves the quiet gate alone");
+
+        // Bracketed paste and key encodings can be split across wire frames.
+        for bytes in [b"\x1b[20".as_slice(), b"0~one\r", b"two\x1b[201~"] {
+            gate.viewer(bytes, true);
+            assert!(gate.take_prompt().is_none(), "a pasted newline is not Enter");
+        }
+        gate.set_busy(true);
+        gate.viewer(b"\x1b[13;", true);
+        gate.viewer(b"1u", true);
+        assert!(gate.take_prompt().is_none(), "still held behind an agent's input");
+        assert_eq!(gate.set_busy(false), b"\x1b[13;1u");
+        let prompt = gate.take_prompt().expect("the held Enter is delivered now");
+        assert_eq!(prompt.by, "human");
+        assert!(prompt.from.is_none() && prompt.ms > 0);
+        assert!(gate.take_prompt().is_none(), "reported once");
+        gate.viewer(b"\r", true);
+        assert_eq!(gate.take_prompt().unwrap().by, "human", "plain Enter too");
+    }
 
     #[test]
     fn automatic_replies_preserve_the_human_quiet_gate() {

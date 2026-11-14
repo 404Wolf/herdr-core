@@ -170,7 +170,7 @@ impl Core {
         }
         let text = self.tagged(from, id, text, true);
         loop {
-            match self.send_first_task(id, &text).await {
+            match self.send_first_task(id, &text, from).await {
                 Ok(sent) => {
                     return FirstMessage { sent: true, started: sent.started, reason: None, turn: Some(sent.turn) };
                 }
