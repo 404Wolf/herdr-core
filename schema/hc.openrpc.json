@@ -1080,6 +1080,13 @@
           "core": {
             "$ref": "#/components/schemas/CoreInfo"
           },
+          "features": {
+            "description": "What this core can do, as `hello` says (e.g. `queue`: it takes\n`terminal.queue`), so a client can choose before it relies on one.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "finished": {
             "format": "uint",
             "minimum": 0,
@@ -1136,7 +1143,8 @@
           "uptime_ms",
           "holders",
           "live",
-          "finished"
+          "finished",
+          "features"
         ],
         "type": "object"
       },
@@ -2485,7 +2493,7 @@
       }
     },
     {
-      "description": "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed. With `inbox_only`, a program that doesn't is refused (`not_following`) instead of typed into; this machine's terminals only.",
+      "description": "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
       "errors": [
         {
           "code": -32000,
@@ -2535,13 +2543,6 @@
             "kind": "drafting"
           },
           "message": "drafting"
-        },
-        {
-          "code": -32000,
-          "data": {
-            "kind": "not_following"
-          },
-          "message": "not_following"
         },
         {
           "code": -32602,
@@ -2600,16 +2601,6 @@
           }
         },
         {
-          "description": "Only queue it in the terminal's inbox: if its program doesn't follow\nits inbox, refuse (`not_following`) instead of typing. This machine's\nterminals only.",
-          "name": "inbox_only",
-          "required": false,
-          "schema": {
-            "default": false,
-            "description": "Only queue it in the terminal's inbox: if its program doesn't follow\nits inbox, refuse (`not_following`) instead of typing. This machine's\nterminals only.",
-            "type": "boolean"
-          }
-        },
-        {
           "description": "The terminal: `t7`, a name, or `machine/t7`.",
           "name": "terminal",
           "required": true,
@@ -2648,6 +2639,79 @@
             "default": false,
             "description": "Then wait for the turn this send started.",
             "type": "boolean"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SendResult"
+        }
+      }
+    },
+    {
+      "description": "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. This machine's terminals only.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "not_found"
+          },
+          "message": "not_found"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "machine_unknown"
+          },
+          "message": "machine_unknown"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "not_following"
+          },
+          "message": "not_following"
+        },
+        {
+          "code": -32602,
+          "data": {
+            "kind": "invalid_params"
+          },
+          "message": "invalid_params"
+        }
+      ],
+      "name": "terminal.queue",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "Who is sending (`HC_TERMINAL_ID`, else the calling process's parent).",
+          "name": "caller",
+          "required": false,
+          "schema": {
+            "description": "Who is sending (`HC_TERMINAL_ID`, else the calling process's parent).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "The terminal: `t7` or a name, on this machine.",
+          "name": "terminal",
+          "required": true,
+          "schema": {
+            "description": "The terminal: `t7` or a name, on this machine.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "The message, tagged as a send's text is.",
+          "name": "text",
+          "required": true,
+          "schema": {
+            "description": "The message, tagged as a send's text is.",
+            "type": "string"
           }
         }
       ],

@@ -126,8 +126,8 @@ does, sends and notes to it are queued there, in order, as JSON lines `{id,
 from, text, kind, ts}` (`kind` send or note), instead of typed; `hc inbox ack
 <id>` drops that one and all before it. Unacknowledged messages come again to
 the next follower. `send` reports `via: inbox` or `via: typed`; `send
---inbox-only` never types: with nobody following it fails with
-`not_following`.
+--inbox-only` (API `terminal.queue`) never types: with nobody following it
+fails with `not_following`.
 
 ## Run programs
 

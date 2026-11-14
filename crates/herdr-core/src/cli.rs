@@ -374,7 +374,12 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
         }
         Cmd::Send(mut p) => {
             p.caller = Some(caller());
-            let r = call("terminal.send", to(&p))?;
+            let r = if p.inbox_only {
+                // Its own method: a core that predates it refuses it as unknown, instead of typing.
+                call("terminal.queue", json!({"terminal": p.terminal, "text": p.text, "caller": p.caller}))?
+            } else {
+                call("terminal.send", to(&p))?
+            };
             let started = match r["started"].as_bool() {
                 Some(true) => "it started working",
                 Some(false) => "it did not start working",
@@ -894,8 +899,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("machine rename", "machine.rename"),
     ("machine rm", "machine.rm"),
 ];
-/// Client-only methods: handshake and opaque document storage.
-pub const API_ONLY: &[&str] = &["hello", "doc.get", "doc.set"];
+/// Client-only methods: handshake and opaque document storage, and
+/// `terminal.queue`, which `send --inbox-only` calls.
+pub const API_ONLY: &[&str] = &["hello", "doc.get", "doc.set", "terminal.queue"];
 
 #[cfg(test)]
 mod tests {

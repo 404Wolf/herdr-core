@@ -148,6 +148,9 @@ pub struct StatusResult {
     /// system package manager): it updates hc, `hc update` won't.
     /// Null for a replaceable plain install.
     pub installed_by: Option<String>,
+    /// What this core can do, as `hello` says (e.g. `queue`: it takes
+    /// `terminal.queue`), so a client can choose before it relies on one.
+    pub features: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -482,14 +485,27 @@ pub struct SendParams {
     #[arg(long, value_parser = cli_seconds)]
     pub timeout: Option<f64>,
     /// Only queue it in the terminal's inbox: if its program doesn't follow
-    /// its inbox, refuse (`not_following`) instead of typing. This machine's
+    /// its inbox, fail with `not_following` instead of typing. This machine's
     /// terminals only.
-    #[arg(long)]
-    #[serde(default)]
+    // Sent as its own method, `terminal.queue`, never as a `terminal.send`
+    // field: a core that predates it would ignore the field and type.
+    #[arg(long, conflicts_with_all = ["force", "only_if", "wait", "timeout"])]
+    #[serde(skip)]
     pub inbox_only: bool,
     /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent), so a
     /// bare wait from the same caller waits for this send's turn.
     #[arg(skip)]
+    pub caller: Option<String>,
+}
+
+/// `terminal.queue`: a send that only ever goes into the inbox.
+#[derive(Deserialize, JsonSchema)]
+pub struct QueueParams {
+    /// The terminal: `t7` or a name, on this machine.
+    pub terminal: String,
+    /// The message, tagged as a send's text is.
+    pub text: String,
+    /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent).
     pub caller: Option<String>,
 }
 

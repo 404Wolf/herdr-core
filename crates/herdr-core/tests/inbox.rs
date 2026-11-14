@@ -3,10 +3,11 @@
 mod common;
 
 use common::*;
-use serde_json::Value;
-use std::io::{BufRead, BufReader};
+use serde_json::{Value, json};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 fn session() -> Session {
@@ -158,7 +159,68 @@ fn an_inbox_only_send_is_queued_or_refused_never_typed() {
     assert_eq!(follower.next()["text"], format!("<hc from=\"{sender}\">--help me</hc>"));
     assert!(!text(&s, &agent).contains("got:"), "nothing typed: {}", text(&s, &agent));
 
-    // Another machine's core may not know the flag and would type: never forwarded.
+    // Another machine's core may predate `terminal.queue`: it's never forwarded.
     let (_, err) = s.err(&["send", "--inbox-only", "rohan/t1", "hi"]);
-    assert_eq!(err["error"]["kind"], "invalid_params", "{err}");
+    assert_eq!(err["error"]["kind"], "machine_unknown", "{err}");
+    // Flags that only make sense for typing don't combine with it.
+    assert!(!s.hc(&["send", "--inbox-only", "--force", &agent, "x"]).status.success());
+    // The core says it takes it.
+    let status = s.json(&["server", "status"]);
+    assert!(status["features"].as_array().unwrap().iter().any(|f| f == "queue"), "{status}");
+}
+
+/// A core that predates `terminal.queue`, on its own socket, modelled on a
+/// real one: it refuses methods it doesn't know, and it ignores fields it
+/// doesn't know, so any `terminal.send` it gets is typed into the terminal,
+/// which follows no inbox (it answers as an old core does: no `via`).
+/// Records each method called.
+fn old_core(dir: &Path) -> (PathBuf, Arc<Mutex<Vec<String>>>) {
+    let socket = dir.join("old-core.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().map_while(Result::ok) {
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut conn = conn;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let req: Value = serde_json::from_str(&line).unwrap();
+                    let method = req["method"].as_str().unwrap_or_default().to_string();
+                    seen.lock().unwrap().push(method.clone());
+                    let mut reply = match method.as_str() {
+                        "hello" => json!({"result": {
+                            "generation": 1, "version": "0.0.0", "core": {"id": "old", "name": "old"},
+                            "framed": false, "methods": ["hello", "terminal.send"], "features": ["framed", "status"],
+                        }}),
+                        "terminal.send" => json!({"result": {"status": "idle", "turn": 1, "started": false}}),
+                        _ => json!({"error": {
+                            "code": -32601, "message": format!("unknown method {method:?}"),
+                            "data": {"kind": "unknown_method", "hint": "see `hc schema`"},
+                        }}),
+                    };
+                    reply["jsonrpc"] = json!("2.0");
+                    reply["id"] = req["id"].clone();
+                    let _ = writeln!(conn, "{reply}");
+                    line.clear();
+                }
+            });
+        }
+    });
+    (socket, calls)
+}
+
+#[test]
+fn a_new_hc_never_has_a_core_that_predates_inbox_only_sends_type_them() {
+    let s = session();
+    let (socket, calls) = old_core(&s.root);
+    let out = s.cmd().env("HC_SOCKET", &socket).args(["send", "--inbox-only", "t1", "hi"]).output().unwrap();
+    assert!(!out.status.success());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["kind"], "unknown_method", "{err}");
+    let calls = calls.lock().unwrap().clone();
+    assert!(calls.contains(&"terminal.queue".to_string()), "{calls:?}");
+    assert!(!calls.contains(&"terminal.send".to_string()), "it would have been typed: {calls:?}");
 }
