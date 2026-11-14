@@ -56,7 +56,8 @@ impl Core {
         waiting
     }
 
-    /// `hc send`: queued when its program follows its inbox, else typed.
+    /// `hc send`: queued when its program follows its inbox, else typed, or
+    /// with `inbox_only` refused (`not_following`), never typed.
     pub async fn send_or_queue(
         &self,
         id: u32,
@@ -64,6 +65,7 @@ impl Core {
         text: &str,
         force: bool,
         only_if: Option<&str>,
+        inbox_only: bool,
     ) -> Result<crate::input::Sent, RpcError> {
         let queued = {
             let mut st = self.lock();
@@ -79,6 +81,13 @@ impl Core {
             }
         };
         let Some((status, turn, reported, waiting)) = queued else {
+            if inbox_only {
+                return Err(RpcError::new(
+                    "not_following",
+                    format!("nothing follows {}'s inbox", crate::terminals::address(id)),
+                    "nothing was typed; its program doesn't read its inbox (`hc inbox --follow`)",
+                ));
+            }
             return self.send(id, text, force, only_if).await;
         };
         let started = self.started_after(id, turn, reported).await;

@@ -570,6 +570,7 @@ Options:
       --if <STATUS>        Only type if the status is exactly this [possible values: idle, working]
       --wait               Then wait for the turn this send started
       --timeout <TIMEOUT>  With wait: seconds before it checks in (default: config, else 180)
+      --inbox-only         Only queue it in the terminal's inbox: if its program doesn't follow its inbox, refuse (`not_following`) instead of typing. This machine's terminals only
   -h, --help               Print help
 ```
 

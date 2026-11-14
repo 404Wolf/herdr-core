@@ -98,8 +98,8 @@ methods! { Ctx<'_>;
         "Open a raw stream to a live terminal on this framed connection (see `hello` with `framed`). Loss ends the stream even when kept; reattach after the restarted event.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "needs_framed"];
     "terminal.send" => terminal_send, SendParams => SendResult,
-        "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
-        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "drafting", "invalid_params", "config"];
+        "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed. With `inbox_only`, a program that doesn't is refused (`not_following`) instead of typed into; this machine's terminals only.",
+        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "drafting", "not_following", "invalid_params", "config"];
     "terminal.inbox" => terminal_inbox, InboxParams => InboxResult,
         "The messages waiting in a terminal's inbox. With `follow` (only the terminal itself, as caller): new ones then arrive as `message` events on this connection, and while it stays open, sends and notes to the terminal are queued here instead of typed. Messages stay until acknowledged.",
         errors ["not_found", "invalid_params", "needs_target"];
@@ -459,7 +459,8 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
     let id = resolve(core, &p.terminal)?;
     let text = core.tagged(p.caller.as_deref(), id, &p.text, false);
     let from = p.caller.clone().filter(|c| crate::terminals::parse_id(c).is_some() || c.contains('/'));
-    let sent = core.send_or_queue(id, from, &text, p.force, p.only_if.map(|w| word(&w)).as_deref()).await?;
+    let sent =
+        core.send_or_queue(id, from, &text, p.force, p.only_if.map(|w| word(&w)).as_deref(), p.inbox_only).await?;
     if let Some(child) = p.caller.as_deref().and_then(crate::terminals::parse_id) {
         let mut st = core.lock();
         if let Some(c) = st

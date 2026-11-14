@@ -782,6 +782,11 @@ pub fn route(core: &Core, method: &str, params: &Value) -> Result<Option<(To, Va
         {
             return Err(RpcError::new("denied", format!("{name} only takes send, read, get and wait from here"), ""));
         }
+        // A core there that doesn't know `inbox_only` would type the text: never forward it.
+        if to.is_some() && method == "terminal.send" && params["inbox_only"] == true {
+            let message = format!("an inbox-only send is for this machine's terminals, not {prefix}/");
+            return Err(RpcError::invalid_params(message).with_hint("send it with that machine's hc"));
+        }
         params["terminal"] = local.into();
         to
     } else {

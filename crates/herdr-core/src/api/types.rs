@@ -481,6 +481,12 @@ pub struct SendParams {
     /// With wait: seconds before it checks in (default: config, else 180).
     #[arg(long, value_parser = cli_seconds)]
     pub timeout: Option<f64>,
+    /// Only queue it in the terminal's inbox: if its program doesn't follow
+    /// its inbox, refuse (`not_following`) instead of typing. This machine's
+    /// terminals only.
+    #[arg(long)]
+    #[serde(default)]
+    pub inbox_only: bool,
     /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent), so a
     /// bare wait from the same caller waits for this send's turn.
     #[arg(skip)]

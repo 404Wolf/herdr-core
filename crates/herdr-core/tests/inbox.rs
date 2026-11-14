@@ -131,3 +131,34 @@ fn a_program_following_its_inbox_gets_messages_out_of_band_in_order_until_it_ack
     assert_eq!(r["via"], "typed", "{r}");
     wait_until("typed", || text(&s, &agent).contains("got:<hc"));
 }
+
+#[test]
+fn an_inbox_only_send_is_queued_or_refused_never_typed() {
+    let rohan = Session::new();
+    let mut s = session();
+    s.env.push(fake_ssh(&s, &[("rohan", &rohan)]));
+    s.json(&["machine", "add", "rohan"]);
+    let echo = "stty -echo; r state=idle; while read -r l; do echo \"got:$l\"; done";
+    let sender = run(&s, &[], echo);
+    let agent = run(&s, &[], echo);
+    wait_until("reported", || get(&s, &sender)["reported"] == true && get(&s, &agent)["reported"] == true);
+
+    // Nobody follows its inbox: refused, and nothing is typed (not even after the quiet period).
+    let (_, err) = s.err(&["send", "--inbox-only", &agent, "review it"]);
+    assert_eq!(err["error"]["kind"], "not_following", "{err}");
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(!text(&s, &agent).contains("got:"), "nothing typed: {}", text(&s, &agent));
+
+    // Following: queued like any send. `--` keeps a text that looks like a flag literal.
+    let follower = Follower::start(&s, &agent, &[]);
+    let r = hc_in(&s, &sender, &["send", "--inbox-only", &agent, "review it"]);
+    assert_eq!(r["via"], "inbox", "{r}");
+    assert_eq!(follower.next()["text"], format!("<hc from=\"{sender}\">review it</hc>"));
+    hc_in(&s, &sender, &["send", "--inbox-only", "--", &agent, "--help me"]);
+    assert_eq!(follower.next()["text"], format!("<hc from=\"{sender}\">--help me</hc>"));
+    assert!(!text(&s, &agent).contains("got:"), "nothing typed: {}", text(&s, &agent));
+
+    // Another machine's core may not know the flag and would type: never forwarded.
+    let (_, err) = s.err(&["send", "--inbox-only", "rohan/t1", "hi"]);
+    assert_eq!(err["error"]["kind"], "invalid_params", "{err}");
+}
