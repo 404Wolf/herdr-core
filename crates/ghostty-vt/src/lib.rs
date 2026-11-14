@@ -758,7 +758,8 @@ impl Terminal {
         if history > 0 && available > 0 && !self.alt_screen() {
             let from = available.saturating_sub(history as u32);
             if let Some(sel) = self.select(ffi::POINT_HISTORY, (0, from), (last.0, available - 1)) {
-                out.extend(self.format(ffi::FORMAT_VT, Some(&sel), false));
+                // Let the viewer wrap history itself so it can reflow on resize.
+                out.extend(self.format_with(ffi::FORMAT_VT, Some(&sel), false, true));
                 // Push those lines up into the viewer's scrollback before painting the screen.
                 out.extend(b"\x1b[0m\r\n".iter().chain(&b"\n".repeat(rows as usize)));
                 out.extend(b"\x1b[H\x1b[2J");
