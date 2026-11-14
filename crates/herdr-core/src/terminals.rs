@@ -138,6 +138,21 @@ pub struct Terminal {
     /// Machines (core ids) it started work on: they may call back to it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub afar: std::collections::BTreeSet<String>,
+    /// Messages its program has yet to acknowledge (see inbox.rs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inbox: Vec<crate::inbox::Message>,
+    /// The id of the last message queued for it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_message: u64,
+    /// The keys of inbox-only messages queued for it in the last
+    /// `inbox::KEYS_KEPT_MS`, with when, oldest first (see
+    /// `inbox::remember_key`): the same key again isn't queued twice.
+    #[serde(default, skip_serializing_if = "std::collections::VecDeque::is_empty")]
+    pub queued_keys: std::collections::VecDeque<(String, u64)>,
+    /// Since when (ms) `queued_keys` has every key queued for it: older
+    /// ones were forgotten (see `inbox::forget_old_keys`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub keys_complete_since: u64,
 }
 
 impl Terminal {
@@ -303,6 +318,10 @@ impl Registry {
                 paste_gap_ms: new.template.as_ref().and_then(|t| t.paste_gap_ms),
                 foreground: None,
                 afar: Default::default(),
+                inbox: Vec::new(),
+                last_message: 0,
+                queued_keys: Default::default(),
+                keys_complete_since: 0,
                 template: new.template.map(|t| t.name),
                 first_message: None,
                 holder: None,
@@ -421,6 +440,10 @@ const PRIVATE: &[&str] = &[
     "restart_after_ms",
     "restart_delay_ms",
     "program_started_ms",
+    "inbox",
+    "last_message",
+    "queued_keys",
+    "keys_complete_since",
 ];
 
 /// A terminal as clients see it (API results, events): its facts, without

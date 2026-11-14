@@ -235,7 +235,11 @@ impl Core {
     async fn deliver_notes(self: Arc<Self>, parent: u32) {
         let enabled = self.notes_on();
         loop {
-            let ready = |st: &State| st.reg.terminals.get(&parent).is_none_or(|t| !t.is_live() || can_take_note(t));
+            // A parent reading its own inbox takes notes even on a dialog: it reads them when it can.
+            let ready = |st: &State| {
+                st.reg.terminals.get(&parent).is_none_or(|t| !t.is_live() || can_take_note(t))
+                    || self.inbox_open(st, parent)
+            };
             while !self.wait_for(Duration::from_secs(60), ready).await {}
             let alive = self.lock().reg.terminals.get(&parent).is_some_and(|t| t.is_live());
             if !alive || !enabled {
@@ -255,6 +259,28 @@ impl Core {
         self.lock().note_tasks.remove(&parent);
     }
 
+    /// The notes for a parent that follows its inbox, queued there instead of
+    /// typed; None when it doesn't (then they are typed).
+    fn queue_notes(&self, parent: u32, afar: &[String]) -> Option<bool> {
+        let mut st = self.lock();
+        if !self.inbox_open(&st, parent) {
+            return None;
+        }
+        let kids = self.unseen(&st, &crate::terminals::address(parent));
+        let mut text: Vec<String> =
+            kids.iter().map(|id| self.note_for(&st, *id, &st.reg.terminals[id].address)).collect();
+        text.extend(afar.iter().cloned());
+        if text.is_empty() {
+            return Some(false);
+        }
+        for id in &kids {
+            let t = st.reg.terminals.get_mut(id).expect("listed");
+            t.noted = t.noted.max(t.news);
+        }
+        self.queue_message(&mut st, parent, None, &text.join("\n"), "note");
+        Some(true)
+    }
+
     /// One batch of notes, built at typing time so stale news is dropped.
     async fn type_note(&self, parent: u32) -> Result<bool, RpcError> {
         let quiet = crate::config::load(&self.paths.config)
@@ -263,8 +289,11 @@ impl Core {
             .map_or_else(crate::input::quiet, |s| Duration::from_secs_f64(s.max(0.0)));
         // Notes from other machines were decided there: type them as they are.
         let afar = self.lock().afar_notes.remove(&parent).unwrap_or_default();
+        if let Some(queued) = self.queue_notes(parent, &afar) {
+            return Ok(queued);
+        }
         let typed = self
-            .type_in(parent, quiet, |st, t| {
+            .type_in(parent, quiet, true, |st, t| {
                 if !can_take_note(t) {
                     return Err(RpcError::new("busy", "the parent got busy", ""));
                 }

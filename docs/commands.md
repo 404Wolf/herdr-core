@@ -32,6 +32,8 @@ Talk to programs
   wait <t>                    wait until it stops working (--output X: until it prints X,
                               --children: your helpers). Use it instead of sleep.
   put <t> <file>              send a file beside it, print where it landed
+  inbox [--follow]            messages for your terminal; following it, sends and notes
+                              are queued for you instead of typed (inbox ack <id>)
 
 No terminal
   exec [--on m] <cmd>         run it, print exactly what it wrote, exit with its code
@@ -220,6 +222,42 @@ Arguments:
 Options:
       --json  JSON output even in a terminal
   -h, --help  Print help
+```
+
+## hc inbox
+
+```text
+Messages for your terminal (--follow: as they come, and take them out of band instead of typed)
+
+Usage: hc inbox [OPTIONS]
+       herdr-core inbox <COMMAND>
+
+Commands:
+  ack   Acknowledge messages up to and including an id: they leave the inbox
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                 JSON output even in a terminal
+      --terminal <TERMINAL>  Whose inbox (default: your own terminal)
+      --after <AFTER>        Only messages after this id [default: 0]
+      --follow               Keep the connection open and print each new message as it is queued. While a program follows its own inbox, sends and notes to it are queued there instead of typed
+  -h, --help                 Print help
+```
+
+## hc inbox ack
+
+```text
+Acknowledge messages up to and including an id: they leave the inbox
+
+Usage: hc inbox ack [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The last message handled: it and every earlier one leave the inbox
+
+Options:
+      --json                 JSON output even in a terminal
+      --terminal <TERMINAL>  Whose inbox (default: your own terminal)
+  -h, --help                 Print help
 ```
 
 ## hc interrupt
@@ -532,6 +570,10 @@ Options:
       --if <STATUS>        Only type if the status is exactly this [possible values: idle, working]
       --wait               Then wait for the turn this send started
       --timeout <TIMEOUT>  With wait: seconds before it checks in (default: config, else 180)
+      --inbox-only         Only queue it in the terminal's inbox: if its program doesn't follow its inbox, fail with `not_following` instead of typing. This machine's terminals only
+      --key <KEY>          With --inbox-only: this message's key. Sent again with the same key (after a lost answer), it isn't queued twice
+      --key-since <MS>     With --key: when it was first sent (ms since the epoch). A key the terminal may have forgotten since is refused, not queued again
+      --core <CORE>        With --inbox-only: only if this core (its id, from `server status`) is the one running; another refuses (`other_core`)
   -h, --help               Print help
 ```
 

@@ -29,6 +29,8 @@ pub struct Filter {
     /// A core that dialed in: only what is here. What it hears from us it
     /// passes on, so two machines that added each other would echo forever.
     pub here_only: bool,
+    /// The terminal's inbox follower: hears its `message` events and nothing else.
+    pub inbox: bool,
 }
 
 impl Filter {
@@ -90,6 +92,19 @@ impl Core {
         });
     }
 
+    /// Whether the program at `address` follows its inbox on a connection still open.
+    pub fn inbox_followed(&self, st: &State, address: &str) -> bool {
+        st.events.subs.iter().any(|s| {
+            s.filter.inbox
+                && s.filter.terminal.as_deref() == Some(address)
+                && match &s.sink {
+                    Sink::Plain { tx, .. } => !tx.is_closed(),
+                    Sink::Framed { .. } => true, // unsubscribed when its connection goes
+                    Sink::Waiter(_) => false,
+                }
+        })
+    }
+
     pub fn subscribed(&self, st: &State, conn: &Arc<Conn>, channel: u32) -> bool {
         st.events
             .subs
@@ -131,6 +146,7 @@ impl Core {
         st.events.seq += 1;
         params["seq"] = st.events.seq.into();
         let afar = params["machine"].is_string() || params["terminal"].as_str().is_some_and(|a| a.contains('/'));
+        let message = params["type"] == "message";
         let plain = notification("event", params.clone());
         let with_record = || {
             let mut params = params.clone();
@@ -140,7 +156,7 @@ impl Core {
         let mut subs = std::mem::take(&mut st.events.subs);
         subs.retain(|sub| {
             let (now, before) = (sub.filter.matches(record), was.is_some_and(|w| sub.filter.matches(w)));
-            if (!now && !before) || (afar && sub.filter.here_only) {
+            if (!now && !before) || (afar && sub.filter.here_only) || sub.filter.inbox != message {
                 return true;
             }
             let line = if now && was.is_some() && !before { with_record() } else { plain.clone() };

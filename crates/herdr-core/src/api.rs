@@ -13,16 +13,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const GENERATION: u32 = 1;
-pub const FEATURES: &[&str] =
-    &["framed", "attach", "events", "status", "shell", "resize_notifications", "automatic_input"];
+pub const FEATURES: &[&str] = &[
+    "framed",
+    "attach",
+    "events",
+    "status",
+    "shell",
+    "resize_notifications",
+    "automatic_input",
+    "queue",
+    "queue-keyed",
+];
 pub const FINISHED_LINES: usize = 1000;
 /// A terminal's identity: fixed at start from whoever starts it.
 pub const IDENTITY_VARS: &[&str] = &["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"];
 
 mod doc;
+mod inbox;
 mod run;
 mod types;
 use doc::*;
+use inbox::*;
 mod waiting;
 use run::*;
 pub(crate) use run::{child_env, not_stopping, tail, terminal_env};
@@ -96,8 +107,17 @@ methods! { Ctx<'_>;
         "Open a raw stream to a live terminal on this framed connection (see `hello` with `framed`). Loss ends the stream even when kept; reattach after the restarted event.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "needs_framed"];
     "terminal.send" => terminal_send, SendParams => SendResult,
-        "Paste text and press Enter, once nobody has typed for ~3 s; keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`.",
-        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "invalid_params", "config"];
+        "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
+        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "drafting", "invalid_params", "config"];
+    "terminal.queue" => terminal_queue, QueueParams => SendResult,
+        "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal within `queue_keys_kept_ms` (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. With `key_since` (when the key was first sent) before the terminal's keys go back, it may have been queued and forgotten: refused with `key_forgotten`, never queued again. With `core`, only that core queues it (`other_core` otherwise). This machine's terminals only.",
+        errors ["not_found", "machine_unknown", "not_following", "other_core", "key_forgotten", "invalid_params"];
+    "terminal.inbox" => terminal_inbox, InboxParams => InboxResult,
+        "The messages waiting in a terminal's inbox. With `follow` (only the terminal itself, as caller): new ones then arrive as `message` events on this connection, and while it stays open, sends and notes to the terminal are queued here instead of typed. Messages stay until acknowledged.",
+        errors ["not_found", "invalid_params", "needs_target"];
+    "terminal.ack" => terminal_ack, AckParams => AckResult,
+        "Acknowledge inbox messages up to and including `id` (only the terminal itself, as caller): they leave its inbox.",
+        errors ["not_found", "invalid_params", "needs_target"];
     "terminal.wait" => terminal_wait, WaitParams => crate::wait::WaitResult,
         "Wait until the program is not working (any word but working, or it exited/was lost); already not working returns at once. A program that never reported status is working until it exits. After a send from the same caller, waits for the turn that send started. A message to the caller also ends it: ended false, reason message, from = sender. A timeout is a check-in: ended false, current status.",
         errors ["not_found", "machine_unknown", "invalid_params", "needs_target", "config"];
@@ -212,6 +232,8 @@ async fn server_status(core: Ctx<'_>, _: Empty) -> Result<StatusResult, RpcError
         live,
         finished: st.reg.terminals.len() - live,
         installed_by: crate::client::installed_by().map(String::from),
+        features: FEATURES.iter().map(|f| f.to_string()).collect(),
+        queue_keys_kept_ms: crate::inbox::KEYS_KEPT_MS,
     })
 }
 
@@ -446,11 +468,43 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
     })
 }
 
+async fn terminal_queue(core: Ctx<'_>, p: QueueParams) -> Result<SendResult, RpcError> {
+    if p.key.as_ref().is_some_and(|k| k.is_empty() || k.len() > crate::inbox::MAX_KEY) {
+        return Err(RpcError::invalid_params(format!("a key is 1 to {} bytes", crate::inbox::MAX_KEY)));
+    }
+    // A key means something only to the core that queued it.
+    if let Some(expected) = p.core.as_deref().filter(|c| *c != core.info.id) {
+        return Err(RpcError::new(
+            "other_core",
+            format!("this is core {}, not {expected}", core.info.id),
+            "nothing was queued; the terminal you meant is on a core that's gone",
+        ));
+    }
+    let send = SendParams {
+        terminal: p.terminal,
+        text: p.text,
+        force: false,
+        only_if: None,
+        wait: false,
+        timeout: None,
+        inbox_only: true,
+        key: p.key,
+        key_since: p.key_since,
+        core: None,
+        caller: p.caller,
+    };
+    terminal_send(core, send).await
+}
+
 async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcError> {
     let timeout = wait_timeout(core, p.timeout)?; // checked before anything is typed
     let id = resolve(core, &p.terminal)?;
     let text = core.tagged(p.caller.as_deref(), id, &p.text, false);
-    let sent = core.send(id, &text, p.force, p.only_if.map(|w| word(&w)).as_deref()).await?;
+    let from = p.caller.clone().filter(|c| crate::terminals::parse_id(c).is_some() || c.contains('/'));
+    let only_if = p.only_if.map(|w| word(&w));
+    let since = p.key_since.unwrap_or_else(crate::runtime::now_ms);
+    let key = p.key.as_deref().map(|key| crate::inbox::QueueKey { key, since });
+    let sent = core.send_or_queue(id, from, &text, p.force, only_if.as_deref(), p.inbox_only, key).await?;
     if let Some(child) = p.caller.as_deref().and_then(crate::terminals::parse_id) {
         let mut st = core.lock();
         if let Some(c) = st
@@ -462,7 +516,7 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
             c.told_parent = true;
         }
     }
-    if sent.status.as_deref() == Some("working") {
+    if sent.status.as_deref() == Some("working") && !sent.repeated {
         let mut st = core.lock();
         let from = p
             .caller
@@ -488,7 +542,15 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
         None
     };
     core.flush_saved().await?;
-    Ok(SendResult { status: sent.status, turn: sent.turn, started: sent.started, wait })
+    Ok(SendResult {
+        status: sent.status,
+        turn: sent.turn,
+        started: sent.started,
+        wait,
+        via: sent.via.into(),
+        waiting: sent.waiting,
+        repeated: sent.repeated,
+    })
 }
 
 async fn machine_exec(core: Ctx<'_>, p: ExecParams) -> Result<ExecResult, RpcError> {
@@ -564,7 +626,7 @@ async fn terminal_interrupt(core: Ctx<'_>, p: InterruptParams) -> Result<Interru
 }
 
 async fn events_subscribe(core: Ctx<'_>, p: SubscribeParams) -> Result<SubscribeResult, RpcError> {
-    use crate::events::{Filter, Sink};
+    use crate::events::Filter;
     // A terminal on a machine is named as it is here; one here, by its id.
     let address = |t: &str| match t.split_once('/').filter(|(m, _)| core.lock().machines.iter().any(|x| x.name == *m)) {
         Some(_) => Ok(t.to_string()),
@@ -572,8 +634,25 @@ async fn events_subscribe(core: Ctx<'_>, p: SubscribeParams) -> Result<Subscribe
     };
     let terminal = p.terminal.as_deref().map(address).transpose()?;
     let children_of = p.children_of.as_deref().map(address).transpose()?;
-    let filter = Filter { terminal, children_of, labels: labels(&p.labels), here_only: from_afar(core) };
-    let (sink, channel) = match (core.conn, core.plain) {
+    let filter = Filter { terminal, children_of, labels: labels(&p.labels), here_only: from_afar(core), inbox: false };
+    let (sink, channel) = event_sink(core, &filter)?;
+    let (seq, terminals) = {
+        let mut st = core.lock();
+        let terminals = core.matching(&st, &filter);
+        core.subscribe(&mut st, filter, sink);
+        (st.events.seq, terminals)
+    };
+    if let Some(channel) = channel {
+        crate::server::heartbeat(core.core.clone(), core.conn.expect("framed").clone(), channel);
+    }
+    Ok(SubscribeResult { seq, terminals, channel })
+}
+
+/// Where this connection receives notifications: a new framed channel, or the
+/// plain connection itself once the reply is out.
+fn event_sink(core: Ctx<'_>, filter: &crate::events::Filter) -> Result<(crate::events::Sink, Option<u32>), RpcError> {
+    use crate::events::Sink;
+    Ok(match (core.conn, core.plain) {
         (Some(conn), _) => {
             let channel = conn.new_channel();
             conn.with(|out| out.open(channel));
@@ -587,17 +666,7 @@ async fn events_subscribe(core: Ctx<'_>, p: SubscribeParams) -> Result<Subscribe
             (Sink::Plain { tx, behind }, None)
         }
         (None, None) => return Err(RpcError::internal("no connection to deliver events on")),
-    };
-    let (seq, terminals) = {
-        let mut st = core.lock();
-        let terminals = core.matching(&st, &filter);
-        core.subscribe(&mut st, filter, sink);
-        (st.events.seq, terminals)
-    };
-    if let Some(channel) = channel {
-        crate::server::heartbeat(core.core.clone(), core.conn.expect("framed").clone(), channel);
-    }
-    Ok(SubscribeResult { seq, terminals, channel })
+    })
 }
 
 /// A machine name that is free: valid, not another machine's, not this core's own.

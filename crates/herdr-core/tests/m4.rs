@@ -159,11 +159,39 @@ fn agents_wait_for_a_person_to_pause() {
     let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
     let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
 
-    // Someone is typing: the send waits for the quiet time.
-    person.typed(b"q");
+    // Someone is pressing keys (that leave no draft): the send waits for the quiet time.
+    person.typed(b"\x1b[A");
     let started = Instant::now();
     s.json(&["send", &t, "x"]);
     assert!(started.elapsed() >= Duration::from_millis(500), "sent after {:?}", started.elapsed());
+}
+
+#[test]
+fn agents_never_type_into_a_persons_unsent_draft() {
+    let mut s = session();
+    s.env.push(("HC_DRAFT_MAX_MS".into(), "1500".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    person.typed(b"hi"); // 68 69, not sent
+    shows(&s, &t, "69");
+
+    // It waits for them, then gives up rather than joining their draft.
+    let started = Instant::now();
+    let (_, err) = s.err(&["send", &t, "x"]);
+    assert_eq!(err["error"]["kind"], "drafting", "{err}");
+    assert!(started.elapsed() >= Duration::from_millis(1500), "gave up after {:?}", started.elapsed());
+    assert!(!text(&s, &t).contains("78"), "nothing typed: {}", text(&s, &t));
+
+    // They send it: the next send goes in.
+    let sending = {
+        let mut cmd = s.cmd();
+        cmd.args(["send", &t, "x"]);
+        std::thread::spawn(move || cmd.output().unwrap())
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    person.typed(b"\r");
+    assert!(sending.join().unwrap().status.success());
+    shows(&s, &t, "78");
 }
 
 #[test]

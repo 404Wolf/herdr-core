@@ -148,6 +148,13 @@ pub struct StatusResult {
     /// system package manager): it updates hc, `hc update` won't.
     /// Null for a replaceable plain install.
     pub installed_by: Option<String>,
+    /// What this core can do, as `hello` says (e.g. `queue`: it takes
+    /// `terminal.queue`; `queue-keyed`: with keys), so a client can choose
+    /// before it relies on one.
+    pub features: Vec<String>,
+    /// How long a terminal remembers a `terminal.queue` key: a sender may
+    /// retry a send whose answer it lost for up to this long.
+    pub queue_keys_kept_ms: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -481,9 +488,53 @@ pub struct SendParams {
     /// With wait: seconds before it checks in (default: config, else 180).
     #[arg(long, value_parser = cli_seconds)]
     pub timeout: Option<f64>,
+    /// Only queue it in the terminal's inbox: if its program doesn't follow
+    /// its inbox, fail with `not_following` instead of typing. This machine's
+    /// terminals only.
+    // Sent as its own method, `terminal.queue`, never as a `terminal.send`
+    // field: a core that predates it would ignore the field and type.
+    #[arg(long, conflicts_with_all = ["force", "only_if", "wait", "timeout"])]
+    #[serde(skip)]
+    pub inbox_only: bool,
+    /// With --inbox-only: this message's key. Sent again with the same key
+    /// (after a lost answer), it isn't queued twice.
+    #[arg(long, requires = "inbox_only")]
+    #[serde(skip)]
+    pub key: Option<String>,
+    /// With --key: when it was first sent (ms since the epoch). A key the
+    /// terminal may have forgotten since is refused, not queued again.
+    #[arg(long, requires = "key", value_name = "MS")]
+    #[serde(skip)]
+    pub key_since: Option<u64>,
+    /// With --inbox-only: only if this core (its id, from `server status`)
+    /// is the one running; another refuses (`other_core`).
+    #[arg(long, requires = "inbox_only")]
+    #[serde(skip)]
+    pub core: Option<String>,
     /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent), so a
     /// bare wait from the same caller waits for this send's turn.
     #[arg(skip)]
+    pub caller: Option<String>,
+}
+
+/// `terminal.queue`: a send that only ever goes into the inbox.
+#[derive(Deserialize, JsonSchema)]
+pub struct QueueParams {
+    /// The terminal: `t7` or a name, on this machine.
+    pub terminal: String,
+    /// The message, tagged as a send's text is.
+    pub text: String,
+    /// Names this message (1 to 128 bytes): with a key already queued on
+    /// that terminal, it isn't queued again.
+    pub key: Option<String>,
+    /// With `key`: when the sender first sent it (ms since the epoch; default
+    /// now). A key the terminal may have forgotten since is refused
+    /// (`key_forgotten`) rather than queued again.
+    pub key_since: Option<u64>,
+    /// The core id the sender means (`server status`): another core refuses
+    /// (`other_core`), since the terminal and its keys are that core's.
+    pub core: Option<String>,
+    /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent).
     pub caller: Option<String>,
 }
 
@@ -499,6 +550,18 @@ pub struct SendResult {
     /// With `wait`: how that turn ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<crate::wait::WaitResult>,
+    /// `typed` into its input, or queued in its `inbox` (its program follows it).
+    pub via: String,
+    /// Queued: how many messages now wait in its inbox, this one included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<usize>,
+    /// `terminal.queue`: its key was queued before, so it wasn't queued again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub repeated: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -528,6 +591,53 @@ pub struct WaitParams {
     /// See `terminal.send`.
     #[arg(skip)]
     pub caller: Option<String>,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct InboxParams {
+    /// Whose inbox (default: your own terminal).
+    #[arg(long)]
+    pub terminal: Option<String>,
+    /// Only messages after this id.
+    #[arg(long, default_value_t = 0)]
+    #[serde(default)]
+    pub after: u64,
+    /// Keep the connection open and print each new message as it is queued.
+    /// While a program follows its own inbox, sends and notes to it are queued
+    /// there instead of typed.
+    #[arg(long)]
+    #[serde(default)]
+    pub follow: bool,
+    /// Who is asking (`HC_TERMINAL_ID`): only a terminal itself may follow its inbox.
+    #[arg(skip)]
+    pub caller: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct InboxResult {
+    /// Messages waiting, oldest first. With follow, new ones then arrive as
+    /// `event` notifications of type `message` (data: one message).
+    pub messages: Vec<crate::inbox::Message>,
+    /// Framed mode: the channel they arrive on. Plain mode: none; this
+    /// connection now carries only notifications.
+    pub channel: Option<u32>,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct AckParams {
+    /// The last message handled: it and every earlier one leave the inbox.
+    pub id: u64,
+    /// Whose inbox (default: your own terminal).
+    #[arg(long)]
+    pub terminal: Option<String>,
+    #[arg(skip)]
+    pub caller: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct AckResult {
+    /// Messages still waiting.
+    pub waiting: usize,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
