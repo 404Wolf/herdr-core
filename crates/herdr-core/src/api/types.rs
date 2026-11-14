@@ -501,6 +501,11 @@ pub struct SendParams {
     #[arg(long, requires = "inbox_only")]
     #[serde(skip)]
     pub key: Option<String>,
+    /// With --key: when it was first sent (ms since the epoch). A key the
+    /// terminal may have forgotten since is refused, not queued again.
+    #[arg(long, requires = "key", value_name = "MS")]
+    #[serde(skip)]
+    pub key_since: Option<u64>,
     /// With --inbox-only: only if this core (its id, from `server status`)
     /// is the one running; another refuses (`other_core`).
     #[arg(long, requires = "inbox_only")]
@@ -522,6 +527,10 @@ pub struct QueueParams {
     /// Names this message (1 to 128 bytes): with a key already queued on
     /// that terminal, it isn't queued again.
     pub key: Option<String>,
+    /// With `key`: when the sender first sent it (ms since the epoch; default
+    /// now). A key the terminal may have forgotten since is refused
+    /// (`key_forgotten`) rather than queued again.
+    pub key_since: Option<u64>,
     /// The core id the sender means (`server status`): another core refuses
     /// (`other_core`), since the terminal and its keys are that core's.
     pub core: Option<String>,

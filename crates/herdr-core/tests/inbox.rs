@@ -272,6 +272,16 @@ fn an_inbox_only_send_with_a_key_is_queued_once_across_lost_answers_and_restarts
     assert_eq!(send("diffd-k2", "and this")["repeated"].as_bool(), Some(true));
     let (_, err) = s.err(&["send", "--inbox-only", "--key", "diffd-k3", &agent, "new"]);
     assert_eq!(err["error"]["kind"], "not_following", "{err}");
+    // A key first sent before the terminal's keys go back may have been
+    // queued and forgotten: refused as such, never queued again, never
+    // `not_following` (which would say it never was).
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let long_ago = (now - 2 * 60 * 60 * 1000).to_string();
+    let (_, err) = s.err(&["send", "--inbox-only", "--key", "diffd-old", "--key-since", &long_ago, &agent, "x"]);
+    assert_eq!(err["error"]["kind"], "key_forgotten", "{err}");
+    // A key it still has is still a repeat, however long ago it was first sent.
+    let r = hc_in(&s, &sender, &["send", "--inbox-only", "--key", "diffd-k1", "--key-since", &long_ago, &agent, "x"]);
+    assert_eq!(r["repeated"].as_bool(), Some(true), "{r}");
     // A key belongs to the core that queued it: another refuses.
     let (_, err) = s.err(&["send", "--inbox-only", "--core", "another-core", "--key", "diffd-k1", &agent, "x"]);
     assert_eq!(err["error"]["kind"], "other_core", "{err}");

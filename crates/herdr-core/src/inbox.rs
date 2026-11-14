@@ -46,13 +46,29 @@ pub const MAX_KEYS: usize = 10_000;
 /// The longest key, in bytes.
 pub const MAX_KEY: usize = 128;
 
+/// A key and when its sender first sent it (`terminal.queue`'s `key_since`).
+#[derive(Clone, Copy, Debug)]
+pub struct QueueKey<'a> {
+    pub key: &'a str,
+    pub since: u64,
+}
+
 /// Drops keys older than [`KEYS_KEPT_MS`] (and past [`MAX_KEYS`], the
-/// oldest). They're kept oldest first, so only the front goes.
+/// oldest), noting from when on the terminal still has every key it
+/// queued. They're kept oldest first, so only the front goes.
 pub fn forget_old_keys(t: &mut Terminal, now: u64) {
     let since = now.saturating_sub(KEYS_KEPT_MS);
     while t.queued_keys.front().is_some_and(|(_, at)| *at < since) || t.queued_keys.len() > MAX_KEYS {
-        t.queued_keys.pop_front();
+        if let Some((_, at)) = t.queued_keys.pop_front() {
+            t.keys_complete_since = t.keys_complete_since.max(at + 1);
+        }
     }
+}
+
+/// From when on `t` remembers every key it queued: a key first sent before
+/// then may have been queued and forgotten, so nobody can tell.
+pub fn keys_complete_since(t: &Terminal, now: u64) -> u64 {
+    t.keys_complete_since.max(now.saturating_sub(KEYS_KEPT_MS))
 }
 
 /// Whether `key` was queued on `t` within [`KEYS_KEPT_MS`].
@@ -93,7 +109,10 @@ impl Core {
     /// with `inbox_only` refused (`not_following`), never typed. A `key`
     /// (inbox-only sends) already queued on that terminal isn't queued again:
     /// the answer says `repeated`, so a sender that lost the first answer can
-    /// safely ask again.
+    /// safely ask again. A key first sent before the terminal's keys are
+    /// complete (older than an hour, or past the cap) is refused with
+    /// `key_forgotten`: it may have been queued, so it isn't queued now, and
+    /// it isn't `not_following` either, which would say it never was.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_or_queue(
         &self,
@@ -103,20 +122,30 @@ impl Core {
         force: bool,
         only_if: Option<&str>,
         inbox_only: bool,
-        key: Option<&str>,
+        key: Option<QueueKey<'_>>,
     ) -> Result<crate::input::Sent, RpcError> {
         let queued = {
             let mut st = self.lock();
             let open = self.inbox_open(&st, id);
             let now = now_ms();
-            let known = |t: &Terminal| key.is_some_and(|key| key_queued(t, key, now));
+            let known = |t: &Terminal| key.is_some_and(|k| key_queued(t, k.key, now));
+            if let (Some(k), Some(t)) = (key, st.reg.terminals.get(&id))
+                && !known(t)
+                && k.since < keys_complete_since(t, now)
+            {
+                return Err(RpcError::new(
+                    "key_forgotten",
+                    format!("{} doesn't remember keys from when `{}` was sent", crate::terminals::address(id), k.key),
+                    "nothing was queued now; it may have been before",
+                ));
+            }
             let found = st.reg.terminals.get(&id).filter(|t| known(t) || (open && t.is_live()));
             match found.map(|t| (crate::input::state_word(t), t.turn, t.reported, t.inbox.len(), known(t))) {
                 Some((word, turn, reported, waiting, true)) => Some((word, turn, reported, waiting, true)),
                 Some((word, turn, reported, _, false)) => {
                     crate::input::check_status(id, word.as_deref(), only_if)?;
-                    if let Some(key) = key {
-                        remember_key(st.reg.terminals.get_mut(&id).expect("found above"), key, now);
+                    if let Some(k) = key {
+                        remember_key(st.reg.terminals.get_mut(&id).expect("found above"), k.key, now);
                     }
                     let waiting = self.queue_message(&mut st, id, from, text, "send");
                     Some((word, turn, reported, waiting, false))
@@ -171,6 +200,8 @@ mod tests {
             remember_key(t, &format!("r{n}"), almost + 2);
         }
         assert_eq!(t.queued_keys.len(), MAX_KEYS);
+        // Past the cap, keys sent before the newest one forgotten can't be vouched for.
+        assert_eq!(keys_complete_since(t, almost + 2), almost + 3);
         // Kept with the terminal, so a restarted core still knows them.
         let saved: Terminal = serde_json::from_value(serde_json::to_value(&*t).unwrap()).unwrap();
         assert_eq!(saved.queued_keys, t.queued_keys);

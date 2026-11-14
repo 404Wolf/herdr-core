@@ -2662,7 +2662,7 @@
       }
     },
     {
-      "description": "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal within `queue_keys_kept_ms` (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. With `core`, only that core queues it (`other_core` otherwise). This machine's terminals only.",
+      "description": "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal within `queue_keys_kept_ms` (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. With `key_since` (when the key was first sent) before the terminal's keys go back, it may have been queued and forgotten: refused with `key_forgotten`, never queued again. With `core`, only that core queues it (`other_core` otherwise). This machine's terminals only.",
       "errors": [
         {
           "code": -32000,
@@ -2691,6 +2691,13 @@
             "kind": "other_core"
           },
           "message": "other_core"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "key_forgotten"
+          },
+          "message": "key_forgotten"
         },
         {
           "code": -32602,
@@ -2735,6 +2742,20 @@
             "description": "Names this message (1 to 128 bytes): with a key already queued on\nthat terminal, it isn't queued again.",
             "type": [
               "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "With `key`: when the sender first sent it (ms since the epoch; default\nnow). A key the terminal may have forgotten since is refused\n(`key_forgotten`) rather than queued again.",
+          "name": "key_since",
+          "required": false,
+          "schema": {
+            "description": "With `key`: when the sender first sent it (ms since the epoch; default\nnow). A key the terminal may have forgotten since is refused\n(`key_forgotten`) rather than queued again.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           }

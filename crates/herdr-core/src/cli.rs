@@ -376,8 +376,10 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             p.caller = Some(caller());
             let r = if p.inbox_only {
                 // Its own method: a core that predates it refuses it as unknown, instead of typing.
-                let params =
-                    json!({"terminal": p.terminal, "text": p.text, "key": p.key, "core": p.core, "caller": p.caller});
+                let params = json!({
+                    "terminal": p.terminal, "text": p.text, "key": p.key, "key_since": p.key_since,
+                    "core": p.core, "caller": p.caller,
+                });
                 call("terminal.queue", params)?
             } else {
                 call("terminal.send", to(&p))?
