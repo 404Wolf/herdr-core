@@ -41,6 +41,7 @@ fn submitted_prompts_reach_get_and_turn_events_without_guessing_from_automatic_i
     assert!(event["params"]["data"].get("prompt").is_none());
     assert!(get(&s, &agent).get("prompt").is_none());
 
+    person.typed(b"\x1b]"); // Alt+] must not hide the following human submission.
     person.typed(b"question\r");
     let event = next_event(&mut events, |e| e["params"]["type"] == "turn");
     let human = get(&s, &agent)["prompt"].clone();

@@ -19,6 +19,8 @@ pub const OUTPUT_SETTLE: Duration = Duration::from_millis(800);
 const STARTUP_MS: u64 = 10_000;
 /// The longest a send waits for a starting agent to settle.
 const SETTLE_MAX: Duration = Duration::from_secs(5);
+/// A partial key never retains an unbounded viewer input history.
+const MAX_KEY_TAIL: usize = 64;
 
 /// A person's typing, as it affects agent input to one terminal.
 #[derive(Default)]
@@ -91,15 +93,29 @@ impl Gate {
                 b'\r' if !self.in_paste => submitted = true,
                 0x1b => {
                     let rest = &bytes[i..];
-                    let (len, csi) = escape(rest);
+                    // Viewer input is keys: ESC ] is Alt+], not an OSC opener.
+                    let (len, csi) = if rest.get(1) == Some(&b'[') {
+                        escape(rest)
+                    } else {
+                        (rest.len().min(2), None)
+                    };
+                    if rest.get(1) == Some(&b'[') && !rest.starts_with(b"\x1b[M") {
+                        let end = len - usize::from(csi.is_some());
+                        if rest[2..end].iter().any(|b| !(0x20..=0x3f).contains(b)) {
+                            i += 2; // malformed prefix; inspect its following keys normally
+                            continue;
+                        }
+                    }
                     let complete = match rest.get(1) {
                         Some(b'[') => csi.is_some() || (rest.starts_with(b"\x1b[M") && rest.len() >= 6),
-                        Some(b']') => rest[..len].ends_with(b"\x07") || rest[..len].ends_with(b"\x1b\\"),
-                        Some(b'O') => rest.len() >= 3,
                         Some(_) => true,
                         None => false,
                     };
                     if !complete {
+                        if rest.len() >= MAX_KEY_TAIL {
+                            i += 2; // forget an overlong key prefix, never its later Enter
+                            continue;
+                        }
                         self.key_tail.extend_from_slice(rest);
                         break;
                     }
@@ -542,6 +558,29 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alt_keys_and_malformed_sequences_cannot_hide_later_enter_or_grow_the_tail() {
+        for alt in [b"\x1b]".as_slice(), b"\x1bP", b"\x1b_", b"\x1bO"] {
+            let mut gate = Gate::default();
+            assert_eq!(gate.viewer(alt, true), alt);
+            assert!(gate.take_prompt().is_none());
+            assert!(gate.key_tail.is_empty(), "Alt keys are not output string openers: {alt:?}");
+            assert_eq!(gate.viewer(b"question\r", true), b"question\r");
+            assert_eq!(gate.take_prompt().expect("human Enter was delivered").by, "human");
+        }
+        let mut gate = Gate::default();
+        gate.viewer(b"\x1b[", true);
+        for _ in 0..100 {
+            gate.viewer(b"1;", true);
+            assert!(gate.key_tail.len() <= MAX_KEY_TAIL);
+        }
+        gate.viewer(b"question\r", true);
+        assert_eq!(gate.take_prompt().unwrap().by, "human");
+        gate.viewer(b"\x1b[", true);
+        gate.viewer(b"\r", true);
+        assert_eq!(gate.take_prompt().expect("an incomplete CSI cannot swallow Enter").by, "human");
+    }
 
     #[test]
     fn only_human_enter_submits_and_held_submissions_wait_for_delivery() {
