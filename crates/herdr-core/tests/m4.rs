@@ -28,6 +28,49 @@ fn status(s: &Session, t: &str) -> Value {
 }
 
 #[test]
+fn submitted_prompts_reach_get_and_turn_events_without_guessing_from_automatic_input() {
+    let s = session();
+    let agent = run(&s, "stty -echo; r state=idle; while read -r l; do r state=working; r state=done; done");
+    wait_until("idle", || status(&s, &agent) == "idle");
+    assert!(get(&s, &agent).get("prompt").is_none());
+    let mut events = s.connect();
+    events.call(1, "events.subscribe", json!({"terminal": agent}));
+    let mut person = Viewer::attach(&s, &agent, 80, 24, json!({}));
+    person.conn.send(person.channel, herdr_core::wire::AUTOMATIC_INPUT, b"automatic\r");
+    let event = next_event(&mut events, |e| e["params"]["type"] == "turn");
+    assert!(event["params"]["data"].get("prompt").is_none());
+    assert!(get(&s, &agent).get("prompt").is_none());
+
+    person.typed(b"question\r");
+    let event = next_event(&mut events, |e| e["params"]["type"] == "turn");
+    let human = get(&s, &agent)["prompt"].clone();
+    assert_eq!(human["by"], "human");
+    assert!(human["from"].is_null() && human["ms"].as_u64().unwrap() > 0);
+    assert_eq!(event["params"]["data"]["prompt"], human);
+    s.err(&["send", "--if", "working", &agent, "refused"]);
+    assert_eq!(get(&s, &agent)["prompt"], human, "a refused send changes nothing");
+
+    let sender = s.json(&["run", "--bg", "sleep", "100"])["address"].as_str().unwrap().to_string();
+    let out = s.cmd().env("HC_TERMINAL_ID", &sender).args(["send", &agent, "follow up"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let event = next_event(&mut events, |e| e["params"]["type"] == "turn");
+    let prompt = get(&s, &agent)["prompt"].clone();
+    assert_eq!(prompt["by"], "agent");
+    assert_eq!(prompt["from"], sender);
+    assert!(prompt["ms"].as_u64().unwrap() >= human["ms"].as_u64().unwrap());
+    assert_eq!(event["params"]["data"]["prompt"], prompt);
+    s.json(&["server", "restart"]);
+    assert_eq!(get(&s, &agent)["prompt"], prompt, "a handover preserves attribution");
+
+    // A script without a terminal caller is still a send, never inferred human input.
+    let reply = s.connect().call(2, "terminal.send", json!({"terminal":agent, "text":"script"}));
+    assert!(reply.get("error").is_none(), "{reply}");
+    let prompt = get(&s, &agent)["prompt"].clone();
+    assert_eq!(prompt["by"], "agent");
+    assert!(prompt["from"].is_null());
+}
+
+#[test]
 fn a_send_into_a_starting_agent_waits_for_its_screen_to_settle() {
     let mut s = session();
     s.env.push(("HC_SETTLE_MS".into(), "800".into()));

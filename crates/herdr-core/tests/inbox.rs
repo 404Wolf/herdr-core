@@ -2,6 +2,7 @@
 
 mod common;
 
+use common::framed::Viewer;
 use common::*;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -233,10 +234,13 @@ fn a_new_hc_never_has_a_core_that_predates_inbox_only_sends_type_them() {
 #[test]
 fn an_inbox_only_send_with_a_key_is_queued_once_across_lost_answers_and_restarts() {
     let s = session();
-    let echo = "stty -echo; r state=idle; while read -r l; do echo \"got:$l\"; done";
+    let echo = "stty -echo; r state=working; while read -r l; do echo \"got:$l\"; done";
     let sender = run(&s, &[], echo);
     let agent = run(&s, &[], echo);
     wait_until("reported", || get(&s, &sender)["reported"] == true && get(&s, &agent)["reported"] == true);
+    let mut person = Viewer::attach(&s, &agent, 80, 24, json!({}));
+    person.typed(b"human steer\r");
+    wait_until("human prompt", || get(&s, &agent)["prompt"]["by"] == "human");
     let follower = Follower::start(&s, &agent, &[]);
     // The core says it keeps keys, and for how long: a sender retries within that.
     let status = s.json(&["server", "status"]);
@@ -249,14 +253,20 @@ fn an_inbox_only_send_with_a_key_is_queued_once_across_lost_answers_and_restarts
 
     let first = send("diffd-k1", "review it");
     assert_eq!((first["via"].as_str(), first.get("repeated")), (Some("inbox"), None), "{first}");
-    assert_eq!(follower.next()["text"], format!("<hc from=\"{sender}\">review it</hc>"));
+    let message = follower.next();
+    assert_eq!(message["text"], format!("<hc from=\"{sender}\">review it</hc>"));
+    let prompt = get(&s, &agent)["prompt"].clone();
+    assert_eq!(prompt, json!({"by":"agent", "from":sender, "ms":message["ts"]}));
+    assert_eq!(get(&s, &agent)["status"]["state"], "working", "enqueue is not inferred consumption");
     // The sender lost that answer and asks again: queued already, not twice.
     let again = send("diffd-k1", "review it");
     assert_eq!((again["via"].as_str(), again["repeated"].as_bool()), (Some("inbox"), Some(true)), "{again}");
+    assert_eq!(get(&s, &agent)["prompt"], prompt, "a deduplicated retry is not a new submission");
     assert!(follower.quiet(), "queued once");
     // Another key is another message.
     send("diffd-k2", "and this");
     assert_eq!(follower.next()["text"], format!("<hc from=\"{sender}\">and this</hc>"));
+    let prompt = get(&s, &agent)["prompt"].clone();
 
     // Acknowledged, and the core restarted: the keys are kept with the terminal.
     hc_in(&s, &agent, &["inbox", "ack", "2"]);
@@ -265,6 +275,7 @@ fn an_inbox_only_send_with_a_key_is_queued_once_across_lost_answers_and_restarts
     let back = Follower::start(&s, &agent, &[]);
     let after = send("diffd-k1", "review it");
     assert_eq!(after["repeated"].as_bool(), Some(true), "{after}");
+    assert_eq!(get(&s, &agent)["prompt"], prompt, "persisted through restart and unchanged by retry");
     assert!(back.quiet(), "not queued again after the restart");
     // Even with nobody following, a key already queued is answered as queued, not refused.
     drop(back);

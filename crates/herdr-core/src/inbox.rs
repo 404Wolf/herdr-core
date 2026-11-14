@@ -7,7 +7,7 @@
 
 use crate::rpc::RpcError;
 use crate::runtime::{Core, State, now_ms};
-use crate::terminals::Terminal;
+use crate::terminals::{Prompt, Terminal};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +28,7 @@ pub struct Message {
 
 /// Queues a message on `t`; returns it and how many are now waiting.
 pub fn push(t: &mut Terminal, from: Option<String>, text: &str, kind: &str, ts: u64) -> (Message, usize) {
+    t.prompt = Some(Prompt { by: "agent".into(), from: from.clone(), ms: ts });
     t.last_message += 1;
     let message = Message { id: t.last_message, from, text: text.to_string(), kind: kind.into(), ts };
     t.inbox.push(message.clone());
@@ -147,7 +148,7 @@ impl Core {
                     if let Some(k) = key {
                         remember_key(st.reg.terminals.get_mut(&id).expect("found above"), k.key, now);
                     }
-                    let waiting = self.queue_message(&mut st, id, from, text, "send");
+                    let waiting = self.queue_message(&mut st, id, from.clone(), text, "send");
                     Some((word, turn, reported, waiting, false))
                 }
                 None => None,
@@ -161,7 +162,7 @@ impl Core {
                     "nothing was typed; its program doesn't read its inbox (`hc inbox --follow`)",
                 ));
             }
-            return self.send(id, text, force, only_if).await;
+            return self.send(id, text, force, only_if, from.as_deref()).await;
         };
         let started = if repeated { None } else { self.started_after(id, turn, reported).await };
         Ok(crate::input::Sent { status, turn, started, via: "inbox", waiting: Some(waiting), repeated })

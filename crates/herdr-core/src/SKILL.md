@@ -70,6 +70,15 @@ In human-readable output, `ls` shows the `where` label or the current folder;
 it is unknown. JSON keeps `cwd` as the launch folder; `get` also includes the
 current folder in `foreground.cwd`.
 
+The optional terminal record `prompt` is the latest observed submitted input:
+`{by: "human" | "agent", from, ms}`. A viewer's human Enter records `human`;
+an accepted send or inbox enqueue records `agent`, with the sender address
+when known. `ms` is Unix time in milliseconds at delivery/enqueue. No known
+submission: the field is absent. Turn events include it when present.
+This includes a steer of an already-working turn: a later agent message
+replaces a human prompt. It does not infer which inbox message the program
+consumed, or whether a turn started; status still comes only from OSC 7501.
+
 `read --lines 0` reads only the visible screen. History reads may scroll a
 full-screen app, then restore its view. While its status is `working`,
 `blocked` or `error`, history reads return only the screen immediately,

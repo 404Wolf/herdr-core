@@ -38,7 +38,7 @@ async fn keys_pressed_during_a_paste_follow_its_submit() {
     // Ignore attach's resize frames. From here the fake holder sees only input.
     while frames.try_recv().is_ok() {}
     {
-        let sending = core.send(id, "abc", false, None);
+        let sending = core.send(id, "abc", false, None, Some("t9"));
         tokio::pin!(sending);
         poll_fn(|cx| {
             assert!(sending.as_mut().poll(cx).is_pending(), "the paste must pause before submit");
@@ -47,12 +47,14 @@ async fn keys_pressed_during_a_paste_follow_its_submit() {
         .await;
         assert_eq!(frames.try_recv().unwrap(), proto::frame(proto::INPUT, id, b"abc"));
         assert!(frames.try_recv().is_err());
-        core.viewer_input(&person, channel, b"Z", false);
+        core.viewer_input(&person, channel, b"Z\r", false);
+        assert!(core.lock().reg.terminals[&id].prompt.is_none(), "neither submit has reached the holder");
         assert!(frames.try_recv().is_err(), "the person's keys must stay held");
         tokio::time::advance(crate::input::PASTE_GAP).await;
         sending.await.unwrap();
         assert_eq!(frames.try_recv().unwrap(), proto::frame(proto::INPUT, id, b"\r"));
-        assert_eq!(frames.try_recv().unwrap(), proto::frame(proto::INPUT, id, b"Z"));
+        assert_eq!(frames.try_recv().unwrap(), proto::frame(proto::INPUT, id, b"Z\r"));
+        assert_eq!(core.lock().reg.terminals[&id].prompt.as_ref().unwrap().by, "human");
     }
     drop(core);
     remove_root(&root);

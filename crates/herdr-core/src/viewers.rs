@@ -252,7 +252,11 @@ impl Core {
         }
         if change.turn_ended {
             let state = status.map(|s| s.state);
-            self.emit(st, "turn", id, serde_json::json!({"turn": turn, "state": state}));
+            let mut data = serde_json::json!({"turn": turn, "state": state});
+            if let Some(prompt) = &st.reg.terminals[&id].prompt {
+                data["prompt"] = serde_json::json!(prompt);
+            }
+            self.emit(st, "turn", id, data);
         }
         if (change.turn_ended || change.stuck || first_task_finished) && st.reg.terminals[&id].is_live() {
             self.news(st, id);
@@ -285,7 +289,13 @@ impl Core {
             self.touch(&mut st, conn, channel, |_| {})
         };
         if let Some(id) = id {
-            let now = st.gates.entry(id).or_default().viewer(bytes, !automatic);
+            let gate = st.gates.entry(id).or_default();
+            let now = gate.viewer(bytes, !automatic);
+            let prompt = gate.take_prompt();
+            if st.link(id).is_some() && let Some(prompt) = prompt {
+                st.reg.terminals.get_mut(&id).expect("live terminal").prompt = Some(prompt);
+                self.save_soon();
+            }
             if let Some(link) = st.link(id) {
                 link.input(id, &now);
             }

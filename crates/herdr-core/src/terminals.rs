@@ -10,6 +10,18 @@ pub const RETAIN_MS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_FINISHED: usize = 500;
 pub const KEEP_RETRY_MS: u64 = 1500;
 
+/// The latest observed submitted input, including a steer of a working turn.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+pub struct Prompt {
+    /// `human` for a viewer's Enter, `agent` for a send or inbox enqueue.
+    pub by: String,
+    /// The sending terminal address, when known; absent for human input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// When the submission was delivered or enqueued, ms since the epoch.
+    pub ms: u64,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct Terminal {
     /// `t7`: this terminal forever on this core.
@@ -67,6 +79,9 @@ pub struct Terminal {
     /// Goes up each time the status leaves `working`.
     #[serde(default)]
     pub turn: u64,
+    /// Latest observed submission; absent when none is known, not inferred from status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<Prompt>,
     /// A sent launch task still awaiting its first completed turn (private).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_task_turn: Option<u64>,
@@ -297,6 +312,7 @@ impl Registry {
                 status_ms: None,
                 records: BTreeMap::new(),
                 turn: 0,
+                prompt: None,
                 first_task_turn: None,
                 reported: false,
                 title: String::new(),
@@ -500,6 +516,23 @@ mod tests {
 
     fn new(name: Option<&str>) -> NewTerminal {
         NewTerminal { name: name.map(Into::into), argv: vec!["true".into()], cwd: "/".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn prompt_is_optional_public_and_survives_registry_serialization() {
+        let mut reg = Registry::default();
+        let id = reg.create(new(None), 0).unwrap();
+        assert!(serde_json::to_value(Public(reg.terminals[&id].clone())).unwrap().get("prompt").is_none());
+        let old = serde_json::to_vec(&reg).unwrap();
+        assert!(serde_json::from_slice::<Registry>(&old).unwrap().terminals[&id].prompt.is_none());
+        let prompt = Prompt { by: "agent".into(), from: Some("laptop/t7".into()), ms: 123 };
+        reg.terminals.get_mut(&id).unwrap().prompt = Some(prompt.clone());
+        let back: Registry = serde_json::from_slice(&serde_json::to_vec(&reg).unwrap()).unwrap();
+        assert_eq!(back.terminals[&id].prompt, Some(prompt.clone()));
+        assert_eq!(
+            serde_json::to_value(Public(back.terminals[&id].clone())).unwrap()["prompt"],
+            serde_json::to_value(prompt).unwrap()
+        );
     }
 
     #[test]

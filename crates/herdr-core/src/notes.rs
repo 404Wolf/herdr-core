@@ -309,7 +309,7 @@ impl Core {
                 let steps = vec![
                     Step::Write(paste(bracketed, &text.join("\n"))),
                     Step::Pause(crate::input::PASTE_GAP),
-                    Step::Write(b"\r".to_vec()),
+                    Step::Submit(b"\r".to_vec(), None),
                 ];
                 Ok((told, steps))
             })
