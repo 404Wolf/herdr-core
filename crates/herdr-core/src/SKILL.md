@@ -127,6 +127,9 @@ still resize the terminal normally. `display: {fg, bg, cursor, cell}` (as in
 `terminal.attach`) likewise answers the program's color and cell-size queries
 from its start, before any viewer attaches.
 
+Attach replays primary-screen history with soft wraps joined, so the viewer
+can wrap it and reflow it on resize. Explicit newlines stay hard line breaks.
+
 On Linux, local Herdr app windows share the smallest reported columns and
 rows while the desktop is active. Focus between those windows keeps that
 grid; colors and cell facts still follow the latest active viewer. A phone,

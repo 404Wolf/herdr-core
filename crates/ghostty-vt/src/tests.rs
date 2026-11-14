@@ -118,6 +118,29 @@ fn a_painted_terminal_looks_the_same_on_a_fresh_one() {
 }
 
 #[test]
+fn painted_history_reflows_soft_wraps_and_preserves_hard_lines_and_colors() {
+    let input = b"\x1b[31mabcdefghij\x1b[32mklmnopqrstuvwx\x1b[44m  \x1b[0m\r\n\
+hard one\r\nhard two\r\nscreen 1\r\nscreen 2\r\nprompt> ";
+    let mut t = Terminal::new(10, 3, 1 << 20);
+    t.write(input);
+    let mut viewer = Terminal::new(10, 3, 1 << 20);
+    viewer.write(&t.paint(100));
+    assert_eq!(viewer.screen_rows(), t.screen_rows());
+    assert!(viewer.plain_text().starts_with("abcdefghijklmnopqrstuvwx\nhard one\nhard two\n"));
+
+    // The replayed history must reflow just as if the viewer had received it live.
+    viewer.resize(30, 3);
+    let mut wide = Terminal::new(30, 3, 1 << 20);
+    wide.write(input);
+    let history = |t: &Terminal| {
+        let sel = t.select(ffi::POINT_HISTORY, (0, 0), (29, 2)).unwrap();
+        t.format(ffi::FORMAT_VT, Some(&sel), false)
+    };
+    // Compare physical rows with styles, including the trailing colored blanks.
+    assert_eq!(history(&viewer), history(&wide));
+}
+
+#[test]
 fn repaint_uses_the_active_screen_not_stale_alternate_screen_modes() {
     let mut t = Terminal::new(30, 4, 1 << 20);
     t.write(b"main\r\n\x1b[?47h\x1b[?1049hALT\x1b[?1049lDONE");
