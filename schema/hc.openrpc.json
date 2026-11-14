@@ -986,7 +986,6 @@
       "SendResult": {
         "properties": {
           "repeated": {
-            "default": false,
             "description": "`terminal.queue`: its key was queued before, so it wasn't queued again.",
             "type": "boolean"
           },
