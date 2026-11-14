@@ -138,6 +138,12 @@ pub struct Terminal {
     /// Machines (core ids) it started work on: they may call back to it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub afar: std::collections::BTreeSet<String>,
+    /// Messages its program has yet to acknowledge (see inbox.rs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inbox: Vec<crate::inbox::Message>,
+    /// The id of the last message queued for it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_message: u64,
 }
 
 impl Terminal {
@@ -303,6 +309,8 @@ impl Registry {
                 paste_gap_ms: new.template.as_ref().and_then(|t| t.paste_gap_ms),
                 foreground: None,
                 afar: Default::default(),
+                inbox: Vec::new(),
+                last_message: 0,
                 template: new.template.map(|t| t.name),
                 first_message: None,
                 holder: None,
@@ -421,6 +429,8 @@ const PRIVATE: &[&str] = &[
     "restart_after_ms",
     "restart_delay_ms",
     "program_started_ms",
+    "inbox",
+    "last_message",
 ];
 
 /// A terminal as clients see it (API results, events): its facts, without

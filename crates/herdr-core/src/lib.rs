@@ -10,6 +10,7 @@ pub mod files;
 pub mod foreground;
 pub mod holder;
 pub mod holder_proto;
+pub mod inbox;
 pub mod input;
 mod kept;
 pub mod keys;

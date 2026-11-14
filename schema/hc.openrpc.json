@@ -1,6 +1,20 @@
 {
   "components": {
     "schemas": {
+      "AckResult": {
+        "properties": {
+          "waiting": {
+            "description": "Messages still waiting.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "waiting"
+        ],
+        "type": "object"
+      },
       "AttachResult": {
         "properties": {
           "automatic_input": {
@@ -378,6 +392,30 @@
         ],
         "type": "string"
       },
+      "InboxResult": {
+        "properties": {
+          "channel": {
+            "description": "Framed mode: the channel they arrive on. Plain mode: none; this\nconnection now carries only notifications.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "messages": {
+            "description": "Messages waiting, oldest first. With follow, new ones then arrive as\n`event` notifications of type `message` (data: one message).",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "messages"
+        ],
+        "type": "object"
+      },
       "InitialSize": {
         "properties": {
           "cols": {
@@ -597,6 +635,45 @@
           "host",
           "version",
           "state"
+        ],
+        "type": "object"
+      },
+      "Message": {
+        "description": "One queued message, as followers receive it.",
+        "properties": {
+          "from": {
+            "description": "The sending terminal (`t3`, `machine/t3`); null for a person, a script or a note.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Counts up from 1 per terminal and is never reused, across restarts too.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "description": "`send` (hc send) or `note` (news about a child).",
+            "type": "string"
+          },
+          "text": {
+            "description": "The text as it would have been typed (with its `<hc>` tag).",
+            "type": "string"
+          },
+          "ts": {
+            "description": "When it was queued, ms since the epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "kind",
+          "ts"
         ],
         "type": "object"
       },
@@ -928,6 +1005,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "via": {
+            "description": "`typed` into its input, or queued in its `inbox` (its program follows it).",
+            "type": "string"
+          },
           "wait": {
             "anyOf": [
               {
@@ -938,10 +1019,20 @@
               }
             ],
             "description": "With `wait`: how that turn ended."
+          },
+          "waiting": {
+            "description": "Queued: how many messages now wait in its inbox, this one included.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
-          "turn"
+          "turn",
+          "via"
         ],
         "type": "object"
       },
@@ -2394,7 +2485,7 @@
       }
     },
     {
-      "description": "Paste text and press Enter, once nobody has typed for ~3 s; keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`.",
+      "description": "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
       "errors": [
         {
           "code": -32000,
@@ -2437,6 +2528,13 @@
             "kind": "status_mismatch"
           },
           "message": "status_mismatch"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "drafting"
+          },
+          "message": "drafting"
         },
         {
           "code": -32602,
@@ -2540,6 +2638,157 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/SendResult"
+        }
+      }
+    },
+    {
+      "description": "The messages waiting in a terminal's inbox. With `follow` (only the terminal itself, as caller): new ones then arrive as `message` events on this connection, and while it stays open, sends and notes to the terminal are queued here instead of typed. Messages stay until acknowledged.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "not_found"
+          },
+          "message": "not_found"
+        },
+        {
+          "code": -32602,
+          "data": {
+            "kind": "invalid_params"
+          },
+          "message": "invalid_params"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "needs_target"
+          },
+          "message": "needs_target"
+        }
+      ],
+      "name": "terminal.inbox",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "Only messages after this id.",
+          "name": "after",
+          "required": false,
+          "schema": {
+            "default": 0,
+            "description": "Only messages after this id.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Who is asking (`HC_TERMINAL_ID`): only a terminal itself may follow its inbox.",
+          "name": "caller",
+          "required": false,
+          "schema": {
+            "description": "Who is asking (`HC_TERMINAL_ID`): only a terminal itself may follow its inbox.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "Keep the connection open and print each new message as it is queued.\nWhile a program follows its own inbox, sends and notes to it are queued\nthere instead of typed.",
+          "name": "follow",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "Keep the connection open and print each new message as it is queued.\nWhile a program follows its own inbox, sends and notes to it are queued\nthere instead of typed.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Whose inbox (default: your own terminal).",
+          "name": "terminal",
+          "required": false,
+          "schema": {
+            "description": "Whose inbox (default: your own terminal).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/InboxResult"
+        }
+      }
+    },
+    {
+      "description": "Acknowledge inbox messages up to and including `id` (only the terminal itself, as caller): they leave its inbox.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "not_found"
+          },
+          "message": "not_found"
+        },
+        {
+          "code": -32602,
+          "data": {
+            "kind": "invalid_params"
+          },
+          "message": "invalid_params"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "needs_target"
+          },
+          "message": "needs_target"
+        }
+      ],
+      "name": "terminal.ack",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "caller",
+          "required": false,
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "The last message handled: it and every earlier one leave the inbox.",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "description": "The last message handled: it and every earlier one leave the inbox.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Whose inbox (default: your own terminal).",
+          "name": "terminal",
+          "required": false,
+          "schema": {
+            "description": "Whose inbox (default: your own terminal).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/AckResult"
         }
       }
     },

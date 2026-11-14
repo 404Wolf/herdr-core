@@ -22,6 +22,8 @@ Talk to programs
   wait <t>                    wait until it stops working (--output X: until it prints X,
                               --children: your helpers). Use it instead of sleep.
   put <t> <file>              send a file beside it, print where it landed
+  inbox [--follow]            messages for your terminal; following it, sends and notes
+                              are queued for you instead of typed (inbox ack <id>)
 
 No terminal
   exec [--on m] <cmd>         run it, print exactly what it wrote, exit with its code

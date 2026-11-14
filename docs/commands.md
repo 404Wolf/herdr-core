@@ -32,6 +32,8 @@ Talk to programs
   wait <t>                    wait until it stops working (--output X: until it prints X,
                               --children: your helpers). Use it instead of sleep.
   put <t> <file>              send a file beside it, print where it landed
+  inbox [--follow]            messages for your terminal; following it, sends and notes
+                              are queued for you instead of typed (inbox ack <id>)
 
 No terminal
   exec [--on m] <cmd>         run it, print exactly what it wrote, exit with its code
@@ -220,6 +222,42 @@ Arguments:
 Options:
       --json  JSON output even in a terminal
   -h, --help  Print help
+```
+
+## hc inbox
+
+```text
+Messages for your terminal (--follow: as they come, and take them out of band instead of typed)
+
+Usage: hc inbox [OPTIONS]
+       herdr-core inbox <COMMAND>
+
+Commands:
+  ack   Acknowledge messages up to and including an id: they leave the inbox
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                 JSON output even in a terminal
+      --terminal <TERMINAL>  Whose inbox (default: your own terminal)
+      --after <AFTER>        Only messages after this id [default: 0]
+      --follow               Keep the connection open and print each new message as it is queued. While a program follows its own inbox, sends and notes to it are queued there instead of typed
+  -h, --help                 Print help
+```
+
+## hc inbox ack
+
+```text
+Acknowledge messages up to and including an id: they leave the inbox
+
+Usage: hc inbox ack [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The last message handled: it and every earlier one leave the inbox
+
+Options:
+      --json                 JSON output even in a terminal
+      --terminal <TERMINAL>  Whose inbox (default: your own terminal)
+  -h, --help                 Print help
 ```
 
 ## hc interrupt
