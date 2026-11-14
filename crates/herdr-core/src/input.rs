@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 /// Pause between the paste and Enter, so the program sees them apart.
 pub const PASTE_GAP: Duration = Duration::from_millis(200);
+/// How often a send waiting on a person's draft looks again.
+const DRAFT_POLL: Duration = Duration::from_millis(100);
 /// Pause between keys, so ESC then x isn't read as alt+x.
 const KEY_GAP: Duration = Duration::from_millis(30);
 /// A program whose output stopped this long ago has finished drawing (`ready: quiet`).
@@ -26,6 +28,8 @@ pub struct Gate {
     busy: bool,
     held: Vec<u8>,
     held_human: bool,
+    /// A person typed text they haven't sent or cleared yet (see `drafting`).
+    draft: bool,
 }
 
 impl Gate {
@@ -50,6 +54,7 @@ impl Gate {
     pub fn viewer(&mut self, bytes: &[u8], human: bool) -> Vec<u8> {
         if human {
             self.last_human = Some(Instant::now());
+            self.draft = drafting(self.draft, bytes);
         }
         if self.busy {
             self.held_human |= human && !bytes.is_empty();
@@ -59,6 +64,76 @@ impl Gate {
             bytes.to_vec()
         }
     }
+}
+
+/// Whether a person's keys leave a draft in the program's input: text starts
+/// one; Enter, ctrl+c or ctrl+u ends it (plain or as CSI u keys). Other
+/// sequences (arrows, mouse, focus) change nothing. Backspacing a draft away
+/// still counts as one: when unsure, an agent's text waits.
+pub fn drafting(mut draft: bool, bytes: &[u8]) -> bool {
+    let mut paste = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' | 0x03 | 0x15 if !paste => draft = false,
+            0x1b => {
+                let (len, csi) = escape(&bytes[i..]);
+                match csi {
+                    Some((b"200", b'~')) => paste = true,
+                    Some((b"201", b'~')) => paste = false,
+                    Some((params, b'u')) => draft = csi_key(draft, params),
+                    _ => {}
+                }
+                i += len;
+                continue;
+            }
+            c if c >= 0x20 && c != 0x7f => draft = true,
+            _ => {}
+        }
+        i += 1;
+    }
+    draft
+}
+
+/// The length of the escape sequence `bytes` starts with, and for a CSI its
+/// parameters and final byte.
+fn escape(bytes: &[u8]) -> (usize, Option<(&[u8], u8)>) {
+    match bytes.get(1) {
+        Some(b'[') => {
+            let end = bytes[2..].iter().position(|b| (0x40..=0x7e).contains(b));
+            match end {
+                // X10 mouse: three raw bytes follow `ESC [ M`.
+                Some(0) if bytes[2] == b'M' => ((6).min(bytes.len()), None),
+                Some(n) => (n + 3, Some((&bytes[2..2 + n], bytes[2 + n]))),
+                None => (bytes.len(), None),
+            }
+        }
+        Some(b']') => {
+            let end = bytes.windows(2).position(|w| w[0] == 0x07 || w == b"\x1b\\");
+            end.map_or((bytes.len(), None), |n| (n + if bytes[n] == 0x07 { 1 } else { 2 }, None))
+        }
+        Some(b'O') => ((3).min(bytes.len()), None),
+        Some(_) => (2, None),
+        None => (1, None),
+    }
+}
+
+/// A key in the CSI u (kitty) encoding: `codepoint[;modifiers]`.
+fn csi_key(draft: bool, params: &[u8]) -> bool {
+    let text = std::str::from_utf8(params).unwrap_or("");
+    let mut parts = text.split(';').map(|p| p.split(':').next().unwrap_or(""));
+    let key: u32 = parts.next().and_then(|k| k.parse().ok()).unwrap_or(0);
+    let mods: u32 = parts.next().and_then(|m| m.parse().ok()).unwrap_or(1);
+    match (key, mods) {
+        (13, 1) | (99 | 117, 5) => false,
+        (32.., 1 | 2) if key != 127 && !(57344..=63743).contains(&key) => true,
+        _ => draft,
+    }
+}
+
+/// How long an agent's text waits for a person's draft to be sent or cleared.
+fn draft_max() -> Duration {
+    env_ms("HC_DRAFT_MAX_MS", 120_000)
 }
 
 pub enum Step {
@@ -85,8 +160,20 @@ fn working(t: &Terminal) -> bool {
     t.status.as_ref().is_some_and(|s| s.state == "working")
 }
 
-fn state_word(t: &Terminal) -> Option<String> {
+pub(crate) fn state_word(t: &Terminal) -> Option<String> {
     t.status.as_ref().map(|s| s.state.clone())
+}
+
+/// `--if`: the status must be exactly `want`, or nothing goes in.
+pub(crate) fn check_status(id: u32, word: Option<&str>, want: Option<&str>) -> Result<(), RpcError> {
+    match want {
+        Some(want) if word != Some(want) => Err(RpcError::new(
+            "status_mismatch",
+            format!("{} is {}, not {want}", crate::terminals::address(id), word.unwrap_or("silent")),
+            "nothing was typed",
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// A paste the way a terminal sends one: bracketed when the program asked.
@@ -100,6 +187,10 @@ pub struct Sent {
     pub turn: u64,
     /// Whether it went `working` soon after; None when it never reports status.
     pub started: Option<bool>,
+    /// `typed`, or `inbox` when its program follows its inbox (inbox.rs).
+    pub via: &'static str,
+    /// Queued: messages now waiting in its inbox.
+    pub waiting: Option<usize>,
 }
 
 pub enum Interrupted {
@@ -112,18 +203,35 @@ pub enum Interrupted {
 impl Core {
     /// Types `steps` (built by `prepare` from the live state) into terminal `id`.
     /// `quiet`: how long a person must have stopped typing first (zero: don't wait).
+    /// `text`: it types text, which must never join a person's draft: it waits
+    /// for them to send or clear it, and refuses after `draft_max`.
     pub async fn type_in<T>(
         &self,
         id: u32,
         quiet: Duration,
+        text: bool,
         prepare: impl FnOnce(&State, &Terminal) -> Result<(T, Vec<Step>), RpcError>,
     ) -> Result<T, RpcError> {
         let queue = self.lock().queues.entry(id).or_default().clone();
         let _turn = queue.lock().await;
+        let give_up = Instant::now() + draft_max();
         loop {
-            let left = self.lock().gates.get(&id).and_then(|g| g.last_human).map(|t| quiet.saturating_sub(t.elapsed()));
+            let (left, draft) = {
+                let st = self.lock();
+                let gate = st.gates.get(&id);
+                let left = gate.and_then(|g| g.last_human).map(|t| quiet.saturating_sub(t.elapsed()));
+                (left, text && gate.is_some_and(|g| g.draft))
+            };
             match left {
                 Some(left) if !left.is_zero() => tokio::time::sleep(left).await,
+                _ if draft && Instant::now() < give_up => tokio::time::sleep(DRAFT_POLL).await,
+                _ if draft => {
+                    return Err(RpcError::new(
+                        "drafting",
+                        format!("{} has a draft a person hasn't sent", crate::terminals::address(id)),
+                        "nothing was typed; try again once they send or clear it",
+                    ));
+                }
                 _ => break,
             }
         }
@@ -194,7 +302,7 @@ impl Core {
         }
         self.settle(id).await?;
         let (status, turn, reported) = self
-            .type_in(id, quiet(), |st, t| {
+            .type_in(id, quiet(), true, |st, t| {
                 let word = state_word(t);
                 if word.as_deref() == Some("blocked") && !force {
                     return Err(RpcError::new(
@@ -210,19 +318,7 @@ impl Core {
                         ),
                     ));
                 }
-                if let Some(want) = only_if
-                    && word.as_deref() != Some(want)
-                {
-                    return Err(RpcError::new(
-                        "status_mismatch",
-                        format!(
-                            "{} is {}, not {want}",
-                            crate::terminals::address(id),
-                            word.as_deref().unwrap_or("silent")
-                        ),
-                        "nothing was typed",
-                    ));
-                }
+                check_status(id, word.as_deref(), only_if)?;
                 let screen = st.screens.get(&id).expect("live terminal has a screen");
                 // A template may say how its agent submits (default: Enter after 200 ms).
                 let submit = match &t.submit {
@@ -236,16 +332,19 @@ impl Core {
                 Ok(((word, t.turn, t.reported), steps))
             })
             .await?;
-        let started = if reported {
-            let went =
-                |st: &State| st.reg.terminals.get(&id).is_none_or(|t| t.turn > turn || working(t) || !t.is_live());
-            self.wait_for(started_window(), went).await;
-            let st = self.lock();
-            Some(st.reg.terminals.get(&id).is_some_and(|t| t.turn > turn || working(t)))
-        } else {
-            None
-        };
-        Ok(Sent { status, turn, started })
+        let started = self.started_after(id, turn, reported).await;
+        Ok(Sent { status, turn, started, via: "typed", waiting: None })
+    }
+
+    /// Whether `id` went to work after `turn` within a few seconds; None when it never reports status.
+    pub(crate) async fn started_after(&self, id: u32, turn: u64, reported: bool) -> Option<bool> {
+        if !reported {
+            return None;
+        }
+        let went = |st: &State| st.reg.terminals.get(&id).is_none_or(|t| t.turn > turn || working(t) || !t.is_live());
+        self.wait_for(started_window(), went).await;
+        let st = self.lock();
+        Some(st.reg.terminals.get(&id).is_some_and(|t| t.turn > turn || working(t)))
     }
 
     /// A starting agent can report before it is ready for a paste (Pi swaps its
@@ -282,7 +381,7 @@ impl Core {
 
     /// Named keys, after a person has paused typing.
     pub async fn keys(&self, id: u32, names: &[String]) -> Result<(Option<String>, u64), RpcError> {
-        self.type_in(id, quiet(), |st, t| {
+        self.type_in(id, quiet(), false, |st, t| {
             let screen = st.screens.get(&id).expect("live terminal has a screen");
             let mut steps = Vec::new();
             for name in names {
@@ -304,7 +403,7 @@ impl Core {
         };
         let before = if reported { -1 } else { self.foreground(id).await };
         let key = self
-            .type_in(id, Duration::ZERO, |st, t| {
+            .type_in(id, Duration::ZERO, false, |st, t| {
                 let default = if reported { "esc" } else { "ctrl+c" };
                 let key = t.stop.clone().unwrap_or_else(|| default.into());
                 let screen = st.screens.get(&id).expect("live terminal has a screen");
@@ -372,6 +471,24 @@ mod tests {
         assert!(gate.has_held());
         assert_eq!(gate.set_busy(false), b"automatictyped");
         assert!(!gate.has_held());
+    }
+
+    #[test]
+    fn a_draft_starts_with_text_and_ends_when_sent_or_cleared() {
+        let d = |bytes: &[u8]| drafting(false, bytes);
+        assert!(d(b"half a thought"));
+        assert!(!d(b"ls\r"), "sent");
+        assert!(!d(b"oops\x15") && !d(b"oops\x03"), "cleared: ctrl+u, ctrl+c");
+        // Keys as CSI u (kitty keyboard): Enter, ctrl+c, ctrl+u end it; text starts one.
+        assert!(!d(b"x\x1b[13u") && !d(b"x\x1b[99;5u") && !d(b"x\x1b[117;5u"));
+        assert!(d(b"\x1b[97u") && drafting(true, b"\x1b[13;2u"), "shift+enter is a newline, not a send");
+        // Moving around, mouse, focus and alt keys type nothing.
+        for keys in [&b"\x1b[A\x1bOB"[..], b"\x1b[<0;10;5M", b"\x1b[M !!", b"\x1b[I", b"\x1bb", b"\x1b]11;?\x07"] {
+            assert!(!d(keys), "{keys:?}");
+        }
+        assert!(drafting(true, b"\x1b[D"), "a draft stays while the cursor moves");
+        // A pasted newline is part of the draft, not a send.
+        assert!(d(b"\x1b[200~one\rtwo\x1b[201~"));
     }
 
     #[test]

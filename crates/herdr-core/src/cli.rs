@@ -13,10 +13,12 @@ use serde_json::{Value, json};
 use std::io::{IsTerminal, Read};
 
 mod file;
+mod inbox;
 mod machine;
 mod output;
 mod update;
 use file::*;
+use inbox::*;
 use machine::*;
 use output::*;
 use update::*;
@@ -80,6 +82,14 @@ enum Cmd {
     },
     /// Follow fact changes as they happen (one JSON line each when piped).
     Events(SubscribeParams),
+    /// Messages for your terminal (--follow: as they come, and take them out of band instead of typed).
+    #[command(args_conflicts_with_subcommands = true)]
+    Inbox {
+        #[command(subcommand)]
+        action: Option<InboxCmd>,
+        #[command(flatten)]
+        params: crate::api::InboxParams,
+    },
     /// Templates you can run by name (~/.config/herdr-core/templates).
     Templates,
     /// Swap this hc for another build and restart (terminals keep running).
@@ -525,6 +535,7 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             follow_events(&paths, to(&p), json)?;
             return Ok(None);
         }
+        Cmd::Inbox { action, params } => return inbox(&paths, action, params, json),
         Cmd::Templates => {
             let r = call("templates.list", json!({}))?;
             let rows: Vec<String> = r["templates"]
@@ -869,6 +880,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("file write", "file.write"),
     ("file edit", "file.edit"),
     ("events", "events.subscribe"),
+    ("inbox", "terminal.inbox"),
+    ("inbox ack", "terminal.ack"),
     ("templates", "templates.list"),
     ("schema", "rpc.discover"),
     ("server start", "server.status"),

@@ -499,6 +499,11 @@ pub struct SendResult {
     /// With `wait`: how that turn ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<crate::wait::WaitResult>,
+    /// `typed` into its input, or queued in its `inbox` (its program follows it).
+    pub via: String,
+    /// Queued: how many messages now wait in its inbox, this one included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<usize>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -528,6 +533,53 @@ pub struct WaitParams {
     /// See `terminal.send`.
     #[arg(skip)]
     pub caller: Option<String>,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct InboxParams {
+    /// Whose inbox (default: your own terminal).
+    #[arg(long)]
+    pub terminal: Option<String>,
+    /// Only messages after this id.
+    #[arg(long, default_value_t = 0)]
+    #[serde(default)]
+    pub after: u64,
+    /// Keep the connection open and print each new message as it is queued.
+    /// While a program follows its own inbox, sends and notes to it are queued
+    /// there instead of typed.
+    #[arg(long)]
+    #[serde(default)]
+    pub follow: bool,
+    /// Who is asking (`HC_TERMINAL_ID`): only a terminal itself may follow its inbox.
+    #[arg(skip)]
+    pub caller: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct InboxResult {
+    /// Messages waiting, oldest first. With follow, new ones then arrive as
+    /// `event` notifications of type `message` (data: one message).
+    pub messages: Vec<crate::inbox::Message>,
+    /// Framed mode: the channel they arrive on. Plain mode: none; this
+    /// connection now carries only notifications.
+    pub channel: Option<u32>,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct AckParams {
+    /// The last message handled: it and every earlier one leave the inbox.
+    pub id: u64,
+    /// Whose inbox (default: your own terminal).
+    #[arg(long)]
+    pub terminal: Option<String>,
+    #[arg(skip)]
+    pub caller: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct AckResult {
+    /// Messages still waiting.
+    pub waiting: usize,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]

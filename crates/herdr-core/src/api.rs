@@ -20,9 +20,11 @@ pub const FINISHED_LINES: usize = 1000;
 pub const IDENTITY_VARS: &[&str] = &["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"];
 
 mod doc;
+mod inbox;
 mod run;
 mod types;
 use doc::*;
+use inbox::*;
 mod waiting;
 use run::*;
 pub(crate) use run::{child_env, not_stopping, tail, terminal_env};
@@ -96,8 +98,14 @@ methods! { Ctx<'_>;
         "Open a raw stream to a live terminal on this framed connection (see `hello` with `framed`). Loss ends the stream even when kept; reattach after the restarted event.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "needs_framed"];
     "terminal.send" => terminal_send, SendParams => SendResult,
-        "Paste text and press Enter, once nobody has typed for ~3 s; keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`.",
-        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "invalid_params", "config"];
+        "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
+        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "drafting", "invalid_params", "config"];
+    "terminal.inbox" => terminal_inbox, InboxParams => InboxResult,
+        "The messages waiting in a terminal's inbox. With `follow` (only the terminal itself, as caller): new ones then arrive as `message` events on this connection, and while it stays open, sends and notes to the terminal are queued here instead of typed. Messages stay until acknowledged.",
+        errors ["not_found", "invalid_params", "needs_target"];
+    "terminal.ack" => terminal_ack, AckParams => AckResult,
+        "Acknowledge inbox messages up to and including `id` (only the terminal itself, as caller): they leave its inbox.",
+        errors ["not_found", "invalid_params", "needs_target"];
     "terminal.wait" => terminal_wait, WaitParams => crate::wait::WaitResult,
         "Wait until the program is not working (any word but working, or it exited/was lost); already not working returns at once. A program that never reported status is working until it exits. After a send from the same caller, waits for the turn that send started. A message to the caller also ends it: ended false, reason message, from = sender. A timeout is a check-in: ended false, current status.",
         errors ["not_found", "machine_unknown", "invalid_params", "needs_target", "config"];
@@ -450,7 +458,8 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
     let timeout = wait_timeout(core, p.timeout)?; // checked before anything is typed
     let id = resolve(core, &p.terminal)?;
     let text = core.tagged(p.caller.as_deref(), id, &p.text, false);
-    let sent = core.send(id, &text, p.force, p.only_if.map(|w| word(&w)).as_deref()).await?;
+    let from = p.caller.clone().filter(|c| crate::terminals::parse_id(c).is_some() || c.contains('/'));
+    let sent = core.send_or_queue(id, from, &text, p.force, p.only_if.map(|w| word(&w)).as_deref()).await?;
     if let Some(child) = p.caller.as_deref().and_then(crate::terminals::parse_id) {
         let mut st = core.lock();
         if let Some(c) = st
@@ -488,7 +497,14 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
         None
     };
     core.flush_saved().await?;
-    Ok(SendResult { status: sent.status, turn: sent.turn, started: sent.started, wait })
+    Ok(SendResult {
+        status: sent.status,
+        turn: sent.turn,
+        started: sent.started,
+        wait,
+        via: sent.via.into(),
+        waiting: sent.waiting,
+    })
 }
 
 async fn machine_exec(core: Ctx<'_>, p: ExecParams) -> Result<ExecResult, RpcError> {
@@ -564,7 +580,7 @@ async fn terminal_interrupt(core: Ctx<'_>, p: InterruptParams) -> Result<Interru
 }
 
 async fn events_subscribe(core: Ctx<'_>, p: SubscribeParams) -> Result<SubscribeResult, RpcError> {
-    use crate::events::{Filter, Sink};
+    use crate::events::Filter;
     // A terminal on a machine is named as it is here; one here, by its id.
     let address = |t: &str| match t.split_once('/').filter(|(m, _)| core.lock().machines.iter().any(|x| x.name == *m)) {
         Some(_) => Ok(t.to_string()),
@@ -572,8 +588,25 @@ async fn events_subscribe(core: Ctx<'_>, p: SubscribeParams) -> Result<Subscribe
     };
     let terminal = p.terminal.as_deref().map(address).transpose()?;
     let children_of = p.children_of.as_deref().map(address).transpose()?;
-    let filter = Filter { terminal, children_of, labels: labels(&p.labels), here_only: from_afar(core) };
-    let (sink, channel) = match (core.conn, core.plain) {
+    let filter = Filter { terminal, children_of, labels: labels(&p.labels), here_only: from_afar(core), inbox: false };
+    let (sink, channel) = event_sink(core, &filter)?;
+    let (seq, terminals) = {
+        let mut st = core.lock();
+        let terminals = core.matching(&st, &filter);
+        core.subscribe(&mut st, filter, sink);
+        (st.events.seq, terminals)
+    };
+    if let Some(channel) = channel {
+        crate::server::heartbeat(core.core.clone(), core.conn.expect("framed").clone(), channel);
+    }
+    Ok(SubscribeResult { seq, terminals, channel })
+}
+
+/// Where this connection receives notifications: a new framed channel, or the
+/// plain connection itself once the reply is out.
+fn event_sink(core: Ctx<'_>, filter: &crate::events::Filter) -> Result<(crate::events::Sink, Option<u32>), RpcError> {
+    use crate::events::Sink;
+    Ok(match (core.conn, core.plain) {
         (Some(conn), _) => {
             let channel = conn.new_channel();
             conn.with(|out| out.open(channel));
@@ -587,17 +620,7 @@ async fn events_subscribe(core: Ctx<'_>, p: SubscribeParams) -> Result<Subscribe
             (Sink::Plain { tx, behind }, None)
         }
         (None, None) => return Err(RpcError::internal("no connection to deliver events on")),
-    };
-    let (seq, terminals) = {
-        let mut st = core.lock();
-        let terminals = core.matching(&st, &filter);
-        core.subscribe(&mut st, filter, sink);
-        (st.events.seq, terminals)
-    };
-    if let Some(channel) = channel {
-        crate::server::heartbeat(core.core.clone(), core.conn.expect("framed").clone(), channel);
-    }
-    Ok(SubscribeResult { seq, terminals, channel })
+    })
 }
 
 /// A machine name that is free: valid, not another machine's, not this core's own.

@@ -118,6 +118,15 @@ Report with `hc send t3 "<result or blocker>"` when done or stuck, not just to
 acknowledge. hc itself notifies you when a child cannot report (blocked,
 error, exited); inspect its screen.
 
+`send` and these notes wait until nobody has typed for ~3 s, and never join a
+draft a person left unsent: they wait for it to be sent or cleared, and after
+2 minutes `send` fails with `drafting` (nothing typed). A program that reads
+its own messages out of band runs `hc inbox --follow` in its terminal: while it
+does, sends and notes to it are queued there, in order, as JSON lines `{id,
+from, text, kind, ts}` (`kind` send or note), instead of typed; `hc inbox ack
+<id>` drops that one and all before it. Unacknowledged messages come again to
+the next follower. `send` reports `via: inbox` or `via: typed`.
+
 ## Run programs
 
 API clients that already know a terminal's pane size can pass `size: {cols, rows}`
