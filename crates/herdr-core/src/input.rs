@@ -191,6 +191,8 @@ pub struct Sent {
     pub via: &'static str,
     /// Queued: messages now waiting in its inbox.
     pub waiting: Option<usize>,
+    /// Queued earlier under the same key: not queued again.
+    pub repeated: bool,
 }
 
 pub enum Interrupted {
@@ -333,7 +335,7 @@ impl Core {
             })
             .await?;
         let started = self.started_after(id, turn, reported).await;
-        Ok(Sent { status, turn, started, via: "typed", waiting: None })
+        Ok(Sent { status, turn, started, via: "typed", waiting: None, repeated: false })
     }
 
     /// Whether `id` went to work after `turn` within a few seconds; None when it never reports status.

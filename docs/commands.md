@@ -571,6 +571,7 @@ Options:
       --wait               Then wait for the turn this send started
       --timeout <TIMEOUT>  With wait: seconds before it checks in (default: config, else 180)
       --inbox-only         Only queue it in the terminal's inbox: if its program doesn't follow its inbox, fail with `not_following` instead of typing. This machine's terminals only
+      --key <KEY>          With --inbox-only: this message's key. Sent again with the same key (after a lost answer), it isn't queued twice
   -h, --help               Print help
 ```
 

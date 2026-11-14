@@ -34,6 +34,19 @@ pub fn push(t: &mut Terminal, from: Option<String>, text: &str, kind: &str, ts: 
     (message, t.inbox.len())
 }
 
+/// How many inbox-only message keys a terminal remembers.
+pub const KEPT_KEYS: usize = 256;
+/// The longest key, in bytes.
+pub const MAX_KEY: usize = 128;
+
+/// Remembers `key` as queued on `t`, keeping the newest [`KEPT_KEYS`]. Kept
+/// with the registry, so a restarted core still knows them.
+pub fn remember_key(t: &mut Terminal, key: &str) {
+    t.queued_keys.push(key.to_string());
+    let over = t.queued_keys.len().saturating_sub(KEPT_KEYS);
+    t.queued_keys.drain(..over);
+}
+
 /// Drops every message up to and including `id`; returns how many are left.
 pub fn ack(t: &mut Terminal, id: u64) -> usize {
     t.inbox.retain(|m| m.id > id);
@@ -57,7 +70,11 @@ impl Core {
     }
 
     /// `hc send`: queued when its program follows its inbox, else typed, or
-    /// with `inbox_only` refused (`not_following`), never typed.
+    /// with `inbox_only` refused (`not_following`), never typed. A `key`
+    /// (inbox-only sends) already queued on that terminal isn't queued again:
+    /// the answer says `repeated`, so a sender that lost the first answer can
+    /// safely ask again.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_or_queue(
         &self,
         id: u32,
@@ -66,21 +83,27 @@ impl Core {
         force: bool,
         only_if: Option<&str>,
         inbox_only: bool,
+        key: Option<&str>,
     ) -> Result<crate::input::Sent, RpcError> {
         let queued = {
             let mut st = self.lock();
             let open = self.inbox_open(&st, id);
-            let found = st.reg.terminals.get(&id).filter(|t| open && t.is_live());
-            match found.map(|t| (crate::input::state_word(t), t.turn, t.reported)) {
-                Some((word, turn, reported)) => {
+            let known = |t: &Terminal| key.is_some_and(|key| t.queued_keys.iter().any(|k| k == key));
+            let found = st.reg.terminals.get(&id).filter(|t| known(t) || (open && t.is_live()));
+            match found.map(|t| (crate::input::state_word(t), t.turn, t.reported, t.inbox.len(), known(t))) {
+                Some((word, turn, reported, waiting, true)) => Some((word, turn, reported, waiting, true)),
+                Some((word, turn, reported, _, false)) => {
                     crate::input::check_status(id, word.as_deref(), only_if)?;
+                    if let Some(key) = key {
+                        remember_key(st.reg.terminals.get_mut(&id).expect("found above"), key);
+                    }
                     let waiting = self.queue_message(&mut st, id, from, text, "send");
-                    Some((word, turn, reported, waiting))
+                    Some((word, turn, reported, waiting, false))
                 }
                 None => None,
             }
         };
-        let Some((status, turn, reported, waiting)) = queued else {
+        let Some((status, turn, reported, waiting, repeated)) = queued else {
             if inbox_only {
                 return Err(RpcError::new(
                     "not_following",
@@ -90,8 +113,8 @@ impl Core {
             }
             return self.send(id, text, force, only_if).await;
         };
-        let started = self.started_after(id, turn, reported).await;
-        Ok(crate::input::Sent { status, turn, started, via: "inbox", waiting: Some(waiting) })
+        let started = if repeated { None } else { self.started_after(id, turn, reported).await };
+        Ok(crate::input::Sent { status, turn, started, via: "inbox", waiting: Some(waiting), repeated })
     }
 
     /// Whether terminal `id`'s program follows its inbox right now.
@@ -104,6 +127,22 @@ impl Core {
 mod tests {
     use super::*;
     use crate::terminals::{NewTerminal, Registry};
+
+    #[test]
+    fn a_terminal_keeps_the_newest_keys() {
+        let mut r = Registry::default();
+        let id = r.create(NewTerminal { argv: vec!["x".into()], ..Default::default() }, 0).unwrap();
+        let t = r.terminals.get_mut(&id).unwrap();
+        for n in 0..KEPT_KEYS + 10 {
+            remember_key(t, &format!("k{n}"));
+        }
+        assert_eq!(t.queued_keys.len(), KEPT_KEYS);
+        assert_eq!(t.queued_keys.first().map(String::as_str), Some("k10"));
+        assert_eq!(t.queued_keys.last(), Some(&format!("k{}", KEPT_KEYS + 9)));
+        // Kept with the terminal, so a restarted core still knows them.
+        let saved: Terminal = serde_json::from_value(serde_json::to_value(&*t).unwrap()).unwrap();
+        assert_eq!(saved.queued_keys, t.queued_keys);
+    }
 
     #[test]
     fn messages_queue_in_order_and_leave_only_when_acknowledged() {

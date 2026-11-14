@@ -985,6 +985,11 @@
       },
       "SendResult": {
         "properties": {
+          "repeated": {
+            "default": false,
+            "description": "`terminal.queue`: its key was queued before, so it wasn't queued again.",
+            "type": "boolean"
+          },
           "started": {
             "description": "Whether it went `working` within a few seconds; null when it doesn't\nreport status, so nobody can tell.",
             "type": [
@@ -2650,7 +2655,7 @@
       }
     },
     {
-      "description": "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. This machine's terminals only.",
+      "description": "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. This machine's terminals only.",
       "errors": [
         {
           "code": -32000,
@@ -2690,6 +2695,18 @@
           "required": false,
           "schema": {
             "description": "Who is sending (`HC_TERMINAL_ID`, else the calling process's parent).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "Names this message (1 to 128 bytes): with a key already queued on\nthat terminal, it isn't queued again.",
+          "name": "key",
+          "required": false,
+          "schema": {
+            "description": "Names this message (1 to 128 bytes): with a key already queued on\nthat terminal, it isn't queued again.",
             "type": [
               "string",
               "null"

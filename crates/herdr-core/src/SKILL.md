@@ -127,7 +127,8 @@ from, text, kind, ts}` (`kind` send or note), instead of typed; `hc inbox ack
 <id>` drops that one and all before it. Unacknowledged messages come again to
 the next follower. `send` reports `via: inbox` or `via: typed`; `send
 --inbox-only` (API `terminal.queue`) never types: with nobody following it
-fails with `not_following`.
+fails with `not_following`. Give it `--key <k>` to make a retry safe: a key
+already queued on that terminal isn't queued again (`repeated: true`).
 
 ## Run programs
 

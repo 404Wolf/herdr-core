@@ -492,6 +492,11 @@ pub struct SendParams {
     #[arg(long, conflicts_with_all = ["force", "only_if", "wait", "timeout"])]
     #[serde(skip)]
     pub inbox_only: bool,
+    /// With --inbox-only: this message's key. Sent again with the same key
+    /// (after a lost answer), it isn't queued twice.
+    #[arg(long, requires = "inbox_only")]
+    #[serde(skip)]
+    pub key: Option<String>,
     /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent), so a
     /// bare wait from the same caller waits for this send's turn.
     #[arg(skip)]
@@ -505,6 +510,9 @@ pub struct QueueParams {
     pub terminal: String,
     /// The message, tagged as a send's text is.
     pub text: String,
+    /// Names this message (1 to 128 bytes): with a key already queued on
+    /// that terminal, it isn't queued again.
+    pub key: Option<String>,
     /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent).
     pub caller: Option<String>,
 }
@@ -526,6 +534,13 @@ pub struct SendResult {
     /// Queued: how many messages now wait in its inbox, this one included.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting: Option<usize>,
+    /// `terminal.queue`: its key was queued before, so it wasn't queued again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub repeated: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]

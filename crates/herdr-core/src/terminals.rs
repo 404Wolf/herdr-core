@@ -144,6 +144,10 @@ pub struct Terminal {
     /// The id of the last message queued for it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub last_message: u64,
+    /// The keys of the last inbox-only messages queued for it, newest last
+    /// (see `inbox::remember_key`): the same key again isn't queued twice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_keys: Vec<String>,
 }
 
 impl Terminal {
@@ -311,6 +315,7 @@ impl Registry {
                 afar: Default::default(),
                 inbox: Vec::new(),
                 last_message: 0,
+                queued_keys: Vec::new(),
                 template: new.template.map(|t| t.name),
                 first_message: None,
                 holder: None,
@@ -431,6 +436,7 @@ const PRIVATE: &[&str] = &[
     "program_started_ms",
     "inbox",
     "last_message",
+    "queued_keys",
 ];
 
 /// A terminal as clients see it (API results, events): its facts, without

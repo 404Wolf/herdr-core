@@ -58,6 +58,11 @@ impl Follower {
     fn next(&self) -> Value {
         self.lines.recv_timeout(Duration::from_secs(10)).expect("a message")
     }
+
+    /// Nothing more arrives for a moment.
+    fn quiet(&self) -> bool {
+        self.lines.recv_timeout(Duration::from_millis(800)).is_err()
+    }
 }
 
 impl Drop for Follower {
@@ -223,4 +228,46 @@ fn a_new_hc_never_has_a_core_that_predates_inbox_only_sends_type_them() {
     let calls = calls.lock().unwrap().clone();
     assert!(calls.contains(&"terminal.queue".to_string()), "{calls:?}");
     assert!(!calls.contains(&"terminal.send".to_string()), "it would have been typed: {calls:?}");
+}
+
+#[test]
+fn an_inbox_only_send_with_a_key_is_queued_once_across_lost_answers_and_restarts() {
+    let s = session();
+    let echo = "stty -echo; r state=idle; while read -r l; do echo \"got:$l\"; done";
+    let sender = run(&s, &[], echo);
+    let agent = run(&s, &[], echo);
+    wait_until("reported", || get(&s, &sender)["reported"] == true && get(&s, &agent)["reported"] == true);
+    let follower = Follower::start(&s, &agent, &[]);
+    let send = |key: &str, text: &str| hc_in(&s, &sender, &["send", "--inbox-only", "--key", key, &agent, text]);
+
+    let first = send("diffd-k1", "review it");
+    assert_eq!((first["via"].as_str(), first.get("repeated")), (Some("inbox"), None), "{first}");
+    assert_eq!(follower.next()["text"], format!("<hc from=\"{sender}\">review it</hc>"));
+    // The sender lost that answer and asks again: queued already, not twice.
+    let again = send("diffd-k1", "review it");
+    assert_eq!((again["via"].as_str(), again["repeated"].as_bool()), (Some("inbox"), Some(true)), "{again}");
+    assert!(follower.quiet(), "queued once");
+    // Another key is another message.
+    send("diffd-k2", "and this");
+    assert_eq!(follower.next()["text"], format!("<hc from=\"{sender}\">and this</hc>"));
+
+    // Acknowledged, and the core restarted: the keys are kept with the terminal.
+    hc_in(&s, &agent, &["inbox", "ack", "2"]);
+    drop(follower);
+    s.json(&["server", "restart"]);
+    let back = Follower::start(&s, &agent, &[]);
+    let after = send("diffd-k1", "review it");
+    assert_eq!(after["repeated"].as_bool(), Some(true), "{after}");
+    assert!(back.quiet(), "not queued again after the restart");
+    // Even with nobody following, a key already queued is answered as queued, not refused.
+    drop(back);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(send("diffd-k2", "and this")["repeated"].as_bool(), Some(true));
+    let (_, err) = s.err(&["send", "--inbox-only", "--key", "diffd-k3", &agent, "new"]);
+    assert_eq!(err["error"]["kind"], "not_following", "{err}");
+    // Keys are 1 to 128 bytes; --key needs --inbox-only.
+    let (_, err) = s.err(&["send", "--inbox-only", "--key", &"k".repeat(129), &agent, "x"]);
+    assert_eq!(err["error"]["kind"], "invalid_params", "{err}");
+    assert!(!s.hc(&["send", "--key", "k", &agent, "x"]).status.success());
+    assert!(!text(&s, &agent).contains("got:"), "nothing typed: {}", text(&s, &agent));
 }
