@@ -101,6 +101,9 @@ impl Viewer {
             return;
         }
         match kind {
+            wire::RESIZE if payload.len() == 4 => self
+                .screen
+                .resize(u16::from_le_bytes([payload[0], payload[1]]), u16::from_le_bytes([payload[2], payload[3]])),
             wire::DATA => {
                 self.screen.write(&payload);
                 self.received += payload.len();
@@ -162,7 +165,7 @@ pub fn desktop(s: &Session) -> (std::process::Child, Framed) {
     use std::process::Stdio;
     let app = s.root.join("herdr-app");
     if !app.exists() {
-        std::fs::copy("/bin/sh", &app).unwrap();
+        std::fs::copy("/nix/store/nnm9gdr70ihc6zc9298mzz8jpcgaciql-bash-5.3p20/bin/bash", &app).unwrap();
     }
     let (client, bridge) = UnixStream::pair().unwrap();
     let child = s

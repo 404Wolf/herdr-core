@@ -47,6 +47,33 @@ pub(super) fn up_to_date(paths: &Paths, release: &str, human: String) -> Result<
     Ok(out)
 }
 
+/// `hc update` without `--from` asks releases.herdr.dev, may download, and may
+/// restart an older core. A package-managed hc (Nix) does none of that: it
+/// is refused before any network or core contact.
+pub(super) fn managed_update_refusal(manager: Option<&str>) -> Option<RpcError> {
+    let how = match manager? {
+        "homebrew" => "brew upgrade herdr-core",
+        "nix" => "update it in your Nix configuration",
+        "mise" => "mise upgrade herdr-core",
+        _ => "update herdr-core the way it was installed (package manager, or sudo)",
+    };
+    Some(RpcError::new(
+        "refused",
+        format!("this hc belongs to {}; it never checks for or installs updates itself", manager?),
+        how,
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn package_managed_hc_never_checks_for_updates() {
+    let refusal = managed_update_refusal(Some("nix")).expect("nix must refuse");
+    assert_eq!(refusal.kind, "refused");
+    assert!(refusal.hint.contains("Nix configuration"), "{}", refusal.hint);
+    assert!(managed_update_refusal(Some("system package manager")).is_some());
+    assert!(managed_update_refusal(None).is_none());
+}
+
 /// Swaps the binary this hc runs from for `from`, then restarts the core
 /// the planned way: every terminal keeps running. One swap path, for people
 /// and for apps that bundle hc.

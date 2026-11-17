@@ -13,8 +13,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const GENERATION: u32 = 1;
-pub const FEATURES: &[&str] =
-    &["framed", "attach", "events", "status", "shell", "resize_notifications", "automatic_input"];
+pub const FEATURES: &[&str] = &[
+    "framed",
+    "attach",
+    "events",
+    "status",
+    "shell",
+    "resize_notifications",
+    "automatic_input",
+    "viewer_visibility",
+    "viewer_focus",
+];
 pub const FINISHED_LINES: usize = 1000;
 /// A terminal's identity: fixed at start from whoever starts it.
 pub const IDENTITY_VARS: &[&str] = &["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"];
@@ -77,6 +86,9 @@ methods! { Ctx<'_>;
         errors [];
     "terminal.get" => terminal_get, TerminalParams => Public,
         "One terminal's facts, live or finished.",
+        errors ["not_found", "machine_unknown"];
+    "terminal.viewers" => terminal_viewers, ViewerListParams => crate::viewers::ViewerListResult,
+        "Read-only local snapshot of attached viewers and the active sizing selector; never queries peers.",
         errors ["not_found", "machine_unknown"];
     "terminal.kill" => terminal_kill, TerminalParams => Public,
         "End the program: hangup, then terminate, then kill. Returns the observed result.",
@@ -287,6 +299,12 @@ async fn terminal_get(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcErr
     result
 }
 
+async fn terminal_viewers(core: Ctx<'_>, p: ViewerListParams) -> Result<crate::viewers::ViewerListResult, RpcError> {
+    let id = resolve(core, &p.terminal)?;
+    record(core, id)?;
+    Ok(core.viewer_list(id, crate::terminals::address(id)))
+}
+
 async fn terminal_kill(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcError> {
     let id = resolve(core, &p.terminal)?;
     if core.lock().reg.terminals.get(&id).is_some_and(|t| t.is_live()) {
@@ -428,6 +446,8 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
             "attach from another terminal",
         ));
     }
+    let desktop_group = core.desktop_group(conn, p.desktop_group.as_deref());
+    let focus_updates = p.focus_updates && desktop_group.is_some();
     let req = crate::viewers::AttachRequest {
         observe: p.observe,
         resize_notifications: p.resize_notifications,
@@ -435,13 +455,19 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
         size: (p.cols, p.rows),
         display: p.display,
         resumed: p.resumed,
-        desktop_group: core.desktop_group(conn, p.desktop_group.as_deref()),
+        visible: !p.visibility_updates || p.visible,
+        visibility_updates: p.visibility_updates,
+        focus_updates,
+        focused: p.focused,
+        desktop_group,
     };
     let channel = core.attach(conn, id, req)?;
     Ok(AttachResult {
         channel,
         terminal: Public(record(core, id)?),
-        resize_notifications: p.observe && p.resize_notifications,
+        resize_notifications: p.resize_notifications,
+        visibility_updates: p.visibility_updates,
+        focus_updates,
         automatic_input: true,
     })
 }

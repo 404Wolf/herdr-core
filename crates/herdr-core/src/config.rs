@@ -19,7 +19,7 @@ pub struct Config {
     pub notes_quiet: Option<f64>,
     /// Size of a terminal nobody is typing in, `COLSxROWS` (default 200x120).
     pub headless: Option<String>,
-    /// Fit local desktop windows together (default), or use the latest active viewer.
+    /// Compatibility names for single-leader desktop sizing: grouped (default) or latest.
     #[serde(default)]
     pub size_policy: SizePolicy,
     /// Scrollback kept per live terminal, in MB (default 5).

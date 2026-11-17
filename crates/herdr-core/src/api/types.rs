@@ -107,7 +107,7 @@ pub struct HelloParams {
     pub core: Option<CoreInfo>,
     /// What that core calls this one (`rohan`), so news about `t7` reaches it as `rohan/t7`.
     pub calls_you: Option<String>,
-    /// Features supported by a core dialing in, including relaying size notifications.
+    /// Features supported by a core dialing in, including relaying size, visibility and focus updates.
     #[serde(default)]
     pub features: Vec<String>,
 }
@@ -296,6 +296,12 @@ pub struct TerminalParams {
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct ViewerListParams {
+    /// A local terminal: `t7` or its local name. This query never fans out to peers.
+    pub terminal: String,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ListParams {
     /// Include finished terminals.
     #[arg(long)]
@@ -381,10 +387,26 @@ pub struct AttachParams {
     #[arg(long)]
     #[serde(default)]
     pub observe: bool,
-    /// Observer understands core-to-viewer RESIZE before replacement paints.
+    /// Viewer understands core-to-viewer RESIZE before replacement paints.
     #[arg(skip)]
     #[serde(default)]
     pub resize_notifications: bool,
+    /// The view is visible on an active workspace; hidden followers cannot claim focus.
+    #[arg(skip)]
+    #[serde(default = "visible_by_default")]
+    pub visible: bool,
+    /// The client understands the viewer-to-core VISIBILITY frame.
+    #[arg(skip)]
+    #[serde(default)]
+    pub visibility_updates: bool,
+    /// The desktop client reports active-window/pane focus through FOCUS frames.
+    #[arg(skip)]
+    #[serde(default)]
+    pub focus_updates: bool,
+    /// This pane is focused in the active desktop window. Ignored without focus_updates.
+    #[arg(skip)]
+    #[serde(default)]
+    pub focused: bool,
     /// Scrollback lines to show first (main screen only).
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -419,10 +441,18 @@ pub struct AttachResult {
     pub channel: u32,
     pub terminal: Public,
     /// True only when the entire path sends RESIZE before replacement paints.
-    /// False or absent means the observer must track size changes separately.
+    /// False or absent means the viewer must track size changes separately.
     pub resize_notifications: bool,
+    /// True only when every core on the path accepts viewer visibility updates.
+    pub visibility_updates: bool,
+    /// True only when every core on the path supports focused desktop sizing.
+    pub focus_updates: bool,
     /// The entire attach path accepts AUTOMATIC_INPUT (kind 6). Absent means use DATA.
     pub automatic_input: bool,
+}
+
+fn visible_by_default() -> bool {
+    true
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]

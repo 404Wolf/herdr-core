@@ -4,11 +4,15 @@
 use super::AsyncRead;
 
 pub(super) fn is_desktop(read: &AsyncRead) -> bool {
-    let Ok(cred) = read.as_ref().peer_cred() else { return false };
+    same_uid_peer_pid(read).is_some_and(desktop_process)
+}
+
+pub(super) fn same_uid_peer_pid(read: &AsyncRead) -> Option<u32> {
+    let cred = read.as_ref().peer_cred().ok()?;
     if cred.uid() != unsafe { libc::geteuid() } {
-        return false;
+        return None;
     }
-    cred.pid().is_some_and(|pid| desktop_process(pid as u32))
+    cred.pid().filter(|pid| *pid > 0).map(|pid| pid as u32)
 }
 
 fn desktop_process(pid: u32) -> bool {
@@ -34,6 +38,13 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+
+    #[tokio::test]
+    async fn peer_pid_comes_from_kernel_same_uid_credentials() {
+        let (server, _client) = tokio::net::UnixStream::pair().unwrap();
+        let (read, _write) = server.into_split();
+        assert_eq!(same_uid_peer_pid(&read), Some(std::process::id()));
+    }
 
     #[test]
     fn desktop_identity_uses_the_executable_and_only_one_parent_hop() {

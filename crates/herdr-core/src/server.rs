@@ -187,6 +187,7 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
     }
     let mut conn = Conn::default();
     conn.local_desktop = local_desktop;
+    conn.peer_pid = platform::local_peer_pid(read.get_ref());
     let conn = Arc::new(conn);
     let mut writer = tokio::spawn(write_frames(core.clone(), conn.clone(), write));
     // Another core dialing in says who it is in its hello.
@@ -362,7 +363,10 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
             (ch, wire::RESIZE) if payload.len() == 4 => {
                 core.viewer_resize(conn, ch, u16_at(&payload, 0), u16_at(&payload, 2))
             }
-            (ch, wire::FOCUS) => core.viewer_focus(conn, ch, payload.first() == Some(&1)),
+            (ch, wire::VISIBILITY) if payload.len() == 1 && payload[0] <= 1 => {
+                core.viewer_visibility(conn, ch, payload[0] == 1)
+            }
+            (ch, wire::FOCUS) if payload.len() == 1 && payload[0] <= 1 => core.viewer_focus(conn, ch, payload[0] == 1),
             (ch, wire::FACTS) => {
                 if let Ok(display) = serde_json::from_slice(&payload) {
                     core.viewer_facts(conn, ch, display);

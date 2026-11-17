@@ -7,6 +7,8 @@ use super::*;
 #[derive(Clone)]
 pub struct Relayed {
     pub automatic_input: bool,
+    pub visibility_updates: bool,
+    pub focus_updates: bool,
     pub line: Arc<Line>,
     pub there: u32,
     pub conn: Arc<Conn>,
@@ -16,6 +18,10 @@ pub struct Relayed {
 
 /// Why an opted-in stream was refused: a hop on the way lost resize support.
 pub(super) const RESIZE_LOST: &str = "resize notifications lost";
+/// Why an opted-in stream was refused: a hop on the way lost visibility support.
+pub(super) const VISIBILITY_LOST: &str = "viewer visibility updates lost";
+/// A resumed stream must not silently lose focused sizing along its path.
+pub(super) const FOCUS_LOST: &str = "viewer focus updates lost";
 
 /// Viewers left waiting by a dropped line to `m` get their terminal back.
 pub(super) async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
@@ -32,10 +38,15 @@ pub(super) async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
         params["history"] = 0.into();
         params["resumed"] = true.into();
         negotiate_resize(&line, &mut params);
+        negotiate_visibility(&line, &mut params);
+        negotiate_focus(&line, &mut params);
         let deadline = deadline_for(&core, "terminal.attach", &params);
-        let sink = ((r.conn.clone(), here), r.params["resize_notifications"] == true);
+        let sink =
+            ((r.conn.clone(), here), r.params["resize_notifications"] == true, r.visibility_updates, r.focus_updates);
         let reply = line.call_into(&m.name, "terminal.attach", params, Some(sink), deadline).await;
         let lost_resize = matches!(&reply, Err(e) if e.message == RESIZE_LOST);
+        let lost_visibility = matches!(&reply, Err(e) if e.message == VISIBILITY_LOST);
+        let lost_focus = matches!(&reply, Err(e) if e.message == FOCUS_LOST);
         let mut st = core.lock();
         // Gone meanwhile (the viewer detached): nothing to resume.
         if !st.relayed.contains_key(&(key, here)) {
@@ -53,13 +64,25 @@ pub(super) async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
         }
         match reply.and_then(|reply| reply["channel"].as_u64()) {
             Some(there) => {
-                st.relayed.insert((key, here), Relayed { line: line.clone(), there: there as u32, ..r });
+                // Focus/visibility can change while the attach RPC is pending.
+                // Retain and replay the latest state under the same lock used
+                // by relay_in, before subsequent frames reach the new channel.
+                let params = st.relayed[&(key, here)].params.clone();
+                if r.visibility_updates {
+                    let visible = params["visible"].as_bool().unwrap_or(true);
+                    let _ = line.frames.send(wire::encode(there as u32, wire::VISIBILITY, &[visible as u8]));
+                }
+                if r.focus_updates {
+                    let focused = params["focused"] == true;
+                    let _ = line.frames.send(wire::encode(there as u32, wire::FOCUS, &[focused as u8]));
+                }
+                st.relayed.insert((key, here), Relayed { line: line.clone(), there: there as u32, params, ..r });
             }
             None => {
                 st.relayed.remove(&(key, here));
                 // A downgraded path must not deliver paints sized for the old
                 // contract; any other failure still hands over what arrived.
-                if lost_resize {
+                if lost_resize || lost_visibility || lost_focus {
                     r.conn.with(|out| out.close(here, b""));
                 } else {
                     r.conn.with(|out| out.finish(here, b""));
@@ -79,31 +102,82 @@ pub(super) fn negotiate_resize(line: &Line, params: &mut Value) {
     }
 }
 
+pub(super) fn negotiate_visibility(line: &Line, params: &mut Value) {
+    if params["visibility_updates"] == true && !line.features.iter().any(|f| f == "viewer_visibility") {
+        params["visibility_updates"] = false.into();
+    }
+}
+
+pub(super) fn visibility_updates(line: &Line, requested: bool, reply: &Value) -> bool {
+    requested && line.features.iter().any(|f| f == "viewer_visibility") && reply["visibility_updates"] == true
+}
+
+pub(super) fn negotiate_focus(line: &Line, params: &mut Value) {
+    if params["focus_updates"] != true || !line.features.iter().any(|f| f == "viewer_focus") {
+        params["focus_updates"] = false.into();
+        params["focused"] = false.into();
+    }
+}
+
+pub(super) fn focus_updates(line: &Line, requested: bool, reply: &Value) -> bool {
+    requested && line.features.iter().any(|f| f == "viewer_focus") && reply["focus_updates"] == true
+}
+
 /// Opens a viewer here on a terminal there: the stream channel there is
 /// relayed to a new channel on this connection, both ways.
 pub async fn attach(core: &Core, conn: &Arc<Conn>, m: &Machine, mut params: Value) -> Result<Value, RpcError> {
     // Never launder an ordinary client's claimed desktop through our trusted line.
     params["desktop_group"] =
         core.desktop_group(conn, params["desktop_group"].as_str()).map_or(Value::Null, |(_, group)| group.into());
+    let visibility_requested = params["visibility_updates"] == true;
+    let focus_requested = params["focus_updates"] == true;
+    if !visibility_requested {
+        params["visible"] = true.into();
+    }
     let line = line(core, m).await?;
-    negotiate_resize(&line, &mut params);
+    let mut forwarded = params.clone();
+    negotiate_resize(&line, &mut forwarded);
+    negotiate_visibility(&line, &mut forwarded);
+    negotiate_focus(&line, &mut forwarded);
     let here = conn.new_channel();
     conn.with(|out| out.open_paused(here));
-    let deadline = deadline_for(core, "terminal.attach", &params);
+    let deadline = deadline_for(core, "terminal.attach", &forwarded);
     match line
-        .call_into(&m.name, "terminal.attach", params.clone(), Some(((conn.clone(), here), false)), deadline)
+        .call_into(
+            &m.name,
+            "terminal.attach",
+            forwarded.clone(),
+            Some(((conn.clone(), here), false, false, false)),
+            deadline,
+        )
         .await
     {
         Ok(mut r) => {
             let there = r["channel"].as_u64().unwrap_or_default() as u32;
-            let enabled = params["observe"] == true
-                && params["resize_notifications"] == true
-                && r["resize_notifications"] == true;
-            r["resize_notifications"] = enabled.into();
-            params["resize_notifications"] = enabled.into();
+            let resize_enabled = forwarded["resize_notifications"] == true && r["resize_notifications"] == true;
+            let visibility_enabled = visibility_updates(&line, visibility_requested, &r);
+            let focus_enabled = focus_updates(&line, focus_requested, &r);
+            r["focus_updates"] = focus_enabled.into();
+            params["focus_updates"] = focus_enabled.into();
+            if !focus_enabled {
+                params["focused"] = false.into();
+            }
+            r["resize_notifications"] = resize_enabled.into();
+            r["visibility_updates"] = visibility_enabled.into();
+            params["resize_notifications"] = resize_enabled.into();
+            params["visibility_updates"] = visibility_enabled.into();
             let automatic_input = automatic_input(&line, &r);
             r["automatic_input"] = automatic_input.into();
-            let viewer = Relayed { automatic_input, line, there, conn: conn.clone(), machine: m.id.clone(), params };
+            let viewer = Relayed {
+                automatic_input,
+                visibility_updates: visibility_enabled,
+                focus_updates: focus_enabled,
+                line,
+                there,
+                conn: conn.clone(),
+                machine: m.id.clone(),
+                params,
+            };
             core.lock().relayed.insert((conn_key(conn), here), viewer);
             r["channel"] = here.into();
             Ok(localize(core, &m.name, &[], r))
@@ -120,6 +194,20 @@ pub fn relay_in(core: &Core, conn: &Arc<Conn>, here: u32, kind: u8, payload: &[u
     let r = {
         let mut st = core.lock();
         let Some(r) = st.relayed.get_mut(&(conn_key(conn), here)) else { return false };
+        if kind == wire::FOCUS {
+            if payload.len() != 1 || payload[0] > 1 {
+                return true;
+            }
+            if r.focus_updates {
+                r.params["focused"] = (payload[0] == 1).into();
+            }
+        }
+        if kind == wire::VISIBILITY {
+            if !r.visibility_updates || payload.len() != 1 || payload[0] > 1 {
+                return true;
+            }
+            r.params["visible"] = (payload[0] == 1).into();
+        }
         // What a reattach after a dropped line brings back.
         if kind == wire::RESIZE && payload.len() == 4 {
             r.params["cols"] = u16::from_le_bytes([payload[0], payload[1]]).into();

@@ -27,6 +27,19 @@ pub(crate) fn local_desktop_viewer(read: &AsyncRead) -> bool {
     }
 }
 
+/// Kernel-authenticated same-uid Unix peer PID, when this platform exposes it.
+pub(crate) fn local_peer_pid(read: &AsyncRead) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        desktop_peer::same_uid_peer_pid(read)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = read;
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_bundle;
 #[cfg(target_os = "macos")]
