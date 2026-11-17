@@ -13,18 +13,28 @@
             "minimum": 0,
             "type": "integer"
           },
+          "focus_updates": {
+            "description": "True only when every core on the path supports focused desktop sizing.",
+            "type": "boolean"
+          },
           "resize_notifications": {
-            "description": "True only when the entire path sends RESIZE before replacement paints.\nFalse or absent means the observer must track size changes separately.",
+            "description": "True only when the entire path sends RESIZE before replacement paints.\nFalse or absent means the viewer must track size changes separately.",
             "type": "boolean"
           },
           "terminal": {
             "$ref": "#/components/schemas/Terminal"
+          },
+          "visibility_updates": {
+            "description": "True only when every core on the path accepts viewer visibility updates.",
+            "type": "boolean"
           }
         },
         "required": [
           "channel",
           "terminal",
           "resize_notifications",
+          "visibility_updates",
+          "focus_updates",
           "automatic_input"
         ],
         "type": "object"
@@ -300,6 +310,27 @@
           "name",
           "argv",
           "cwd"
+        ],
+        "type": "object"
+      },
+      "GridSize": {
+        "properties": {
+          "cols": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cols",
+          "rows"
         ],
         "type": "object"
       },
@@ -1362,6 +1393,195 @@
         ],
         "type": "object"
       },
+      "ViewerDesktopGroup": {
+        "properties": {
+          "group": {
+            "type": "string"
+          },
+          "line": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "line",
+          "group"
+        ],
+        "type": "object"
+      },
+      "ViewerIdentity": {
+        "properties": {
+          "channel": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "connection_id": {
+            "description": "Monotonic connection ID, unique for this core process lifetime.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connection_id",
+          "channel"
+        ],
+        "type": "object"
+      },
+      "ViewerInfo": {
+        "properties": {
+          "active_ms_ago": {
+            "description": "Milliseconds since last focus/input/size/visibility activity.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "awaiting_size": {
+            "type": "boolean"
+          },
+          "contributes_to_grid": {
+            "description": "The sole selected viewer whose offer or sticky focus grid sets the size.",
+            "type": "boolean"
+          },
+          "desktop_group": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ViewerDesktopGroup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "focus_updates": {
+            "description": "The attach path negotiated focused desktop sizing.",
+            "type": "boolean"
+          },
+          "focused": {
+            "description": "Last reported active-window/pane focus state, independent of sticky leadership.",
+            "type": "boolean"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/ViewerIdentity"
+          },
+          "leader": {
+            "type": "boolean"
+          },
+          "observe": {
+            "type": "boolean"
+          },
+          "offered": {
+            "$ref": "#/components/schemas/GridSize"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/ViewerOrigin"
+          },
+          "peer": {
+            "description": "Connected peer name for a relayed viewer; absent for local connections.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peer_pid": {
+            "description": "Same-uid local Unix socket peer PID (possibly an `hc connect` child, not its GPUI parent).\nNever populated for relayed connections; unavailable credentials/PID are null.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "resize_notifications": {
+            "type": "boolean"
+          },
+          "size_eligible": {
+            "description": "Candidate in the current sizing selector (can be false while visible).",
+            "type": "boolean"
+          },
+          "sized": {
+            "type": "boolean"
+          },
+          "visibility_updates": {
+            "type": "boolean"
+          },
+          "visible": {
+            "description": "Effective visibility; legacy clients remain visible until detach. Sticky focus ownership can remain hidden.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "identity",
+          "origin",
+          "offered",
+          "visible",
+          "size_eligible",
+          "visibility_updates",
+          "focus_updates",
+          "focused",
+          "resize_notifications",
+          "observe",
+          "sized",
+          "awaiting_size",
+          "leader",
+          "contributes_to_grid"
+        ],
+        "type": "object"
+      },
+      "ViewerListResult": {
+        "properties": {
+          "current_grid": {
+            "$ref": "#/components/schemas/GridSize"
+          },
+          "leader": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ViewerIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "selected_grid": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GridSize"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the same selector used by the live resizer currently chooses."
+          },
+          "terminal": {
+            "type": "string"
+          },
+          "viewers": {
+            "items": {
+              "$ref": "#/components/schemas/ViewerInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "terminal",
+          "current_grid",
+          "viewers"
+        ],
+        "type": "object"
+      },
+      "ViewerOrigin": {
+        "enum": [
+          "local_desktop",
+          "local_client",
+          "relayed"
+        ],
+        "type": "string"
+      },
       "WaitResult": {
         "properties": {
           "children": {
@@ -1479,12 +1699,12 @@
           }
         },
         {
-          "description": "Features supported by a core dialing in, including relaying size notifications.",
+          "description": "Features supported by a core dialing in, including relaying size, visibility and focus updates.",
           "name": "features",
           "required": false,
           "schema": {
             "default": [],
-            "description": "Features supported by a core dialing in, including relaying size notifications.",
+            "description": "Features supported by a core dialing in, including relaying size, visibility and focus updates.",
             "items": {
               "type": "string"
             },
@@ -1960,6 +2180,44 @@
       }
     },
     {
+      "description": "Read-only local snapshot of attached viewers and the active sizing selector; never queries peers.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "not_found"
+          },
+          "message": "not_found"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "machine_unknown"
+          },
+          "message": "machine_unknown"
+        }
+      ],
+      "name": "terminal.viewers",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "A local terminal: `t7` or its local name. This query never fans out to peers.",
+          "name": "terminal",
+          "required": true,
+          "schema": {
+            "description": "A local terminal: `t7` or its local name. This query never fans out to peers.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ViewerListResult"
+        }
+      }
+    },
+    {
       "description": "End the program: hangup, then terminate, then kill. Returns the observed result.",
       "errors": [
         {
@@ -2325,6 +2583,26 @@
           }
         },
         {
+          "description": "The desktop client reports active-window/pane focus through FOCUS frames.",
+          "name": "focus_updates",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "The desktop client reports active-window/pane focus through FOCUS frames.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "This pane is focused in the active desktop window. Ignored without focus_updates.",
+          "name": "focused",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "This pane is focused in the active desktop window. Ignored without focus_updates.",
+            "type": "boolean"
+          }
+        },
+        {
           "description": "Scrollback lines to show first (main screen only).",
           "name": "history",
           "required": false,
@@ -2347,12 +2625,12 @@
           }
         },
         {
-          "description": "Observer understands core-to-viewer RESIZE before replacement paints.",
+          "description": "Viewer understands core-to-viewer RESIZE before replacement paints.",
           "name": "resize_notifications",
           "required": false,
           "schema": {
             "default": false,
-            "description": "Observer understands core-to-viewer RESIZE before replacement paints.",
+            "description": "Viewer understands core-to-viewer RESIZE before replacement paints.",
             "type": "boolean"
           }
         },
@@ -2383,6 +2661,26 @@
           "schema": {
             "description": "The terminal: `t7`, a name, or `machine/t7`.",
             "type": "string"
+          }
+        },
+        {
+          "description": "The client understands the viewer-to-core VISIBILITY frame.",
+          "name": "visibility_updates",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "The client understands the viewer-to-core VISIBILITY frame.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "The view is visible on an active workspace; hidden followers cannot claim focus.",
+          "name": "visible",
+          "required": false,
+          "schema": {
+            "default": true,
+            "description": "The view is visible on an active workspace; hidden followers cannot claim focus.",
+            "type": "boolean"
           }
         }
       ],
