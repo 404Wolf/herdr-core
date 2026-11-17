@@ -205,6 +205,14 @@ Use the returned address to wait/read it; don't launch a duplicate.
 `hc put <t> <file>` sends a file beside a terminal and prints its destination.
 `hc label <t> key=value` adds labels.
 
+New terminals inherit only `herdr.space` from their effective parent on the
+same core (the caller by default, or `--parent` when given). An explicit
+`--label herdr.space=...` overrides it, including an empty value. Other labels
+are never inherited. `--no-parent`, an unlabeled parent, or no resolved local
+parent leaves labels as given. Runs on another core (`--on`) do not copy the
+caller's space: space IDs are local layout metadata. An explicit `--parent`
+on the destination core can supply that parent's space.
+
 ## Other machines and files
 
 Your harness's own file tools touch only the machine you run on. Use hc for

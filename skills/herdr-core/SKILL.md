@@ -13,3 +13,8 @@ If not, ask the user once this session whether to use hc for this work.
 Before using hc, run `hc --skill` and follow it.
 For the Herdr window (spaces, tabs, layouts, mods, what's shown),
 run `herdr-app --skill`.
+
+`hc run` inherits only the effective local parent's `herdr.space` label;
+`--label herdr.space=...` overrides it. `--no-parent` suppresses inheritance.
+Cross-core callers do not pass their space; an explicit destination parent
+can supply it. See `hc --skill` for the full rules.

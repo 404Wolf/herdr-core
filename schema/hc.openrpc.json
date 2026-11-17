@@ -1822,7 +1822,7 @@
           }
         },
         {
-          "description": "Labels, key=value (repeatable).",
+          "description": "Labels, key=value (repeatable). Inherits only herdr.space from the\neffective local parent unless explicitly set; never across cores.",
           "name": "labels",
           "required": false,
           "schema": {
@@ -1830,7 +1830,7 @@
               "type": "string"
             },
             "default": {},
-            "description": "Labels, key=value (repeatable).",
+            "description": "Labels, key=value (repeatable). Inherits only herdr.space from the\neffective local parent unless explicitly set; never across cores.",
             "type": "object"
           }
         },
