@@ -17,6 +17,7 @@ Terminals
   run <cmd|template> [task]   run it and wait like a shell (--bg: don't wait)
   ls                          list live terminals (--all: finished too)
   get <t>                     show one terminal
+  viewers <t>                 show attached viewers and local sizing decision
   attach [t]                  put this terminal on it (ctrl+\ detaches)
   read <t>                    print its screen and history
   kill <t>                    end its program
@@ -491,7 +492,7 @@ Options:
       --name <NAME>        Name, unique among live terminals: 1-32 of a-z 0-9 - _ 
       --cwd <CWD>          Working directory (default: where hc runs; through the API, the core's; with --on, that machine's home)
       --on <MACHINE>       Run it on another machine (see `hc machine ls`); its address is `machine/t7`
-      --label <K=V>        Labels, key=value (repeatable)
+      --label <K=V>        Labels, key=value (repeatable). Inherits only herdr.space from the effective local parent unless explicitly set; never across cores
       --parent <PARENT>    Parent terminal (default: the terminal it is started from)
       --no-parent          No parent, even when started from a terminal
       --no-notify          Don't type notes about it into its parent
@@ -621,6 +622,21 @@ Options:
       --version <X.Y.Z>  At least this release (`0.1.4`): nothing changes when this hc is already that or newer
       --force            Allow an older version (saved state only moves forward), or a release of another protocol generation
   -h, --help             Print help
+```
+
+## hc viewers
+
+```text
+Show attached viewers and the local sizing decision for one terminal
+
+Usage: hc viewers [OPTIONS] <TERMINAL>
+
+Arguments:
+  <TERMINAL>  A local terminal: `t7` or its local name. This query never fans out to peers
+
+Options:
+      --json  JSON output even in a terminal
+  -h, --help  Print help
 ```
 
 ## hc wait

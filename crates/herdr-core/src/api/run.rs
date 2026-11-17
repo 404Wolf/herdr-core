@@ -144,6 +144,17 @@ pub(super) async fn start(
             })?
             .instance
             .clone();
+        let mut labels = labels(&p.labels);
+        // Spaces belong to this core: only the resolved local parent can supply one.
+        if !labels.contains_key("herdr.space")
+            && let Some(space) = parent
+                .as_deref()
+                .and_then(crate::terminals::parse_id)
+                .and_then(|id| st.reg.terminals.get(&id))
+                .and_then(|t| t.labels.get("herdr.space"))
+        {
+            labels.insert("herdr.space".into(), space.clone());
+        }
         let new = NewTerminal {
             template,
             die_with_parent: parent.is_some() && !p.outlive_parent,
@@ -152,7 +163,7 @@ pub(super) async fn start(
             rm: p.rm,
             keep: p.keep,
             name: p.name,
-            labels: labels(&p.labels),
+            labels,
             argv: p.argv.clone(),
             cwd: cwd.clone(),
             cols,
