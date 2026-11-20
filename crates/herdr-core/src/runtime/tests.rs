@@ -1100,6 +1100,9 @@ mod guarded {
         }
         std::fs::write(paths().state.join("terminals.json"), value.to_string()).unwrap();
         let core = Core::start(paths(), CoreInfo { id: "test".into(), name: "test".into() }).unwrap();
+        core.flush_saved().await.unwrap();
+        let on_disk = std::fs::read_to_string(paths().state.join("terminals.json")).unwrap();
+        assert!(on_disk.contains("\"incarnation\":\""), "the backfill is on disk after the first start: {on_disk}");
         let first = {
             let st = core.lock();
             // `attach_all` finds no holder for the live record: it ended with its holder. The backfill
@@ -1122,6 +1125,11 @@ mod guarded {
         let again = Core::start(paths(), CoreInfo { id: "test".into(), name: "test".into() }).unwrap();
         assert_eq!(again.lock().reg.terminals[&live].incarnation.as_deref(), Some(inc.as_str()));
         drop(again);
+        // And a restart straight after the first, with no other save in between (the load
+        // saved the backfill itself): still the same one, never a new one.
+        let third = Core::start(paths(), CoreInfo { id: "test".into(), name: "test".into() }).unwrap();
+        assert_eq!(third.lock().reg.terminals[&live].incarnation.as_deref(), Some(inc.as_str()));
+        drop(third);
         remove_root(&root);
     }
 

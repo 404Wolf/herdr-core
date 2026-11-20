@@ -211,6 +211,10 @@ impl Core {
             dirty: Default::default(),
             save_due: Notify::new(),
         });
+        // The backfilled incarnations are saved now, not with the next save that happens to
+        // come: a second restart before then must not hand out new ones (the phone would
+        // see every agent as replaced).
+        core.save(&core.lock());
         core.attach_all()?;
         Ok(core)
     }

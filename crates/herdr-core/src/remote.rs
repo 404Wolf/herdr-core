@@ -59,7 +59,32 @@ pub struct Line {
     build: Option<String>,
 }
 
+/// What a call's params ask of the core that gets it, as a hello feature: a
+/// core without it ignores the param (params are not checked for unknown
+/// fields) and would act as if it were absent: type unguarded, read unbounded.
+fn needed_feature(method: &str, params: &Value) -> Option<&'static str> {
+    let set = |k: &str| !params[k].is_null();
+    match method {
+        "terminal.send" if set("incarnation") || set("if_ctx") || set("within_ms") => Some("send-guarded"),
+        "terminal.read" if set("max_bytes") || params["stitch"] == false => Some("read-bounded"),
+        _ => None,
+    }
+}
+
 impl Line {
+    /// Refuses a call whose guard or bound the core on this line would ignore (`needs_update`),
+    /// before anything is forwarded.
+    fn require(&self, name: &str, method: &str, params: &Value) -> Result<(), RpcError> {
+        match needed_feature(method, params) {
+            Some(feature) if !self.features.iter().any(|f| f == feature) => Err(RpcError::new(
+                "needs_update",
+                format!("{name}'s hc is older and ignores what {method} asks of it ({feature}); nothing was sent"),
+                format!("hc machine update {name}"),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn new(frames: mpsc::UnboundedSender<Vec<u8>>, hello: &Value) -> Arc<Line> {
         let features = hello["features"].as_array().into_iter().flatten();
         Arc::new(Line {
@@ -1017,6 +1042,7 @@ async fn forward_once(core: &Core, m: &Machine, method: &str, mut params: Value)
             format!("hc machine update {}", m.name),
         ));
     }
+    line.require(&m.name, method, &params)?;
     let reply = line.call(&m.name, method, params, deadline).await.map_err(|e| match e.kind.as_str() {
         "unknown_method" => RpcError::new(
             "needs_update",
@@ -1049,6 +1075,7 @@ pub async fn forward_to(core: &Core, to: &To, method: &str, params: Value) -> Re
                 .ok_or_else(|| RpcError::new("unavailable", format!("{name} is not connected"), "try again later"))?;
             let calls_me = core.lock().peers.get(id).map(|p| p.calls_me.clone()).unwrap_or_default();
             let deadline = deadline_for(core, method, &params);
+            line.require(name, method, &params)?;
             let reply = line.call(name, method, params, deadline).await?;
             Ok(if method.starts_with("doc.") { reply } else { localize(core, name, &[calls_me.as_str()], reply) })
         }

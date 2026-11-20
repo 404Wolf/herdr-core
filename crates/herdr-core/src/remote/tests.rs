@@ -1385,3 +1385,38 @@ async fn a_relay_carries_a_legacy_viewers_input_and_never_rewrites_a_frame() {
     drop(core);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_guard_or_bound_is_refused_for_a_core_that_would_ignore_it() {
+    use serde_json::json;
+    let (frames, mut sent) = tokio::sync::mpsc::unbounded_channel();
+    let features = |list: &[&str]| Line::new(frames.clone(), &json!({"features": list}));
+    let old = features(&["framed", "attach"]);
+    let new = features(&["send-guarded", "read-bounded"]);
+    let guarded = json!({"terminal": "t1", "text": "x", "incarnation": "i", "if_ctx": "c", "within_ms": 5000});
+    for (method, params) in [
+        ("terminal.send", guarded.clone()),
+        ("terminal.send", json!({"terminal": "t1", "text": "x", "incarnation": "i"})),
+        ("terminal.send", json!({"terminal": "t1", "text": "x", "within_ms": 5})),
+        ("terminal.read", json!({"terminal": "t1", "max_bytes": 1000})),
+        ("terminal.read", json!({"terminal": "t1", "stitch": false})),
+    ] {
+        let e = old.require("far", method, &params).expect_err(&format!("{method} {params}"));
+        assert_eq!(e.kind, "needs_update");
+        new.require("far", method, &params).expect("a core that has the feature gets it");
+    }
+    // Calls that ask for nothing new go to any core.
+    for (method, params) in [
+        ("terminal.send", json!({"terminal": "t1", "text": "x"})),
+        ("terminal.send", json!({"terminal": "t1", "text": "x", "incarnation": null})),
+        ("terminal.read", json!({"terminal": "t1", "lines": 5})),
+        ("terminal.read", json!({"terminal": "t1", "stitch": true})),
+        ("terminal.get", json!({"terminal": "t1", "max_bytes": 5})),
+    ] {
+        old.require("far", method, &params).expect("an old call is not refused");
+    }
+    // `read-bounded` is not `send-guarded`.
+    let only_send = features(&["send-guarded"]);
+    assert!(only_send.require("far", "terminal.read", &json!({"max_bytes": 1})).is_err());
+    assert!(sent.try_recv().is_err(), "nothing was forwarded");
+}
