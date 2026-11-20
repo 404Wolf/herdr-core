@@ -148,6 +148,29 @@ queued on that terminal in the last hour (`server status`'s
 `queue_keys_kept_ms`) isn't queued again (`repeated: true`); `--core <id>`
 makes sure it's that core.
 
+Every terminal record (`hc get --json`, list, attach, events) has an
+`incarnation` (16 hex characters, new each time a program starts in it, saved;
+hello feature `incarnation`) and a `ctx` (`<core process>-<n>`, in memory: it
+moves when a person or an agent types into it, when its status report changes
+in state, kind, message or title, and when a program starts; never for a
+terminal's own replies, the terminal title or progress; also in `status`
+events). A guarded send (hello feature `send-guarded`) is `terminal.send` with
+`incarnation`, `if_ctx` and optionally `within_ms` (at most 15000, default
+10000, `hc send --incarnation I --if-ctx C --within-ms N`): it types only if the
+terminal still runs that incarnation (`replaced`), its `ctx` is still `if_ctx`
+(`context_changed`) and it isn't blocked (`blocked`; no `force`), and it never
+waits longer than `within_ms` for a person's typing or draft, or for its turn
+(`busy`). Those four refusals type nothing. It holds the terminal's input from
+that check to its submit key, so a person's keys wait and go in after it.
+`unknown` means a write failed or something other than the paste reached the
+program before the submit key: no submit key was sent and nothing is typed
+again, but the text may be sitting unsent in the program's input box, where a
+later Enter would submit it. Look before sending anything else. `hc read`
+takes `--max-bytes N` and `--stitch false` (hello feature `read-bounded`): the
+text is cut to N JSON-escaped bytes, oldest lines first (`truncated`), only
+the `--lines` rows asked for are formatted, and `incarnation` says which
+program was read.
+
 A `warning` in the answer of `send`, `keys` or `interrupt` means the call went
 through but core could not save its terminals just now (a full disk, say). It
 keeps trying on its own: don't repeat the call. `hc server status` says the

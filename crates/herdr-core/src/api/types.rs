@@ -404,17 +404,21 @@ pub struct ReadParams {
     /// JSON-escaped (what goes on the wire). The oldest lines are dropped to
     /// fit and the result says `truncated`.
     #[arg(long, value_name = "BYTES")]
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<usize>,
     /// Feature `read-bounded`: false never scrolls a full-screen program to
     /// read its history (its screen is read as it is).
     #[arg(long, action = clap::ArgAction::Set, default_value_t = true, value_name = "BOOL")]
-    #[serde(default = "stitch_by_default")]
+    #[serde(default = "stitch_by_default", skip_serializing_if = "is_true")]
     pub stitch: bool,
 }
 
 fn stitch_by_default() -> bool {
     true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -434,6 +438,7 @@ pub struct ReadResult {
     /// The program's incarnation when the text was read, under the same lock
     /// as the text. Absent for a terminal that never started a program.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incarnation: Option<String>,
 }
 
@@ -635,10 +640,12 @@ pub struct SendParams {
     /// has typed into it and its status report hasn't changed), else refuse
     /// with `context_changed`.
     #[arg(long, requires = "incarnation")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_ctx: Option<String>,
     /// Guarded send: the longest it waits for a person's typing or draft, or
     /// for its turn, in ms (at most 15000, default 10000); then `busy`.
     #[arg(long, requires = "incarnation", value_name = "MS")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub within_ms: Option<u64>,
     /// Who is sending (`HC_TERMINAL_ID`, else the calling process's parent), so a
     /// bare wait from the same caller waits for this send's turn.
