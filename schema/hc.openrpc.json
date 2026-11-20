@@ -863,8 +863,19 @@
             "description": "\"screen\", \"history\", or \"stitched\" (a full-screen app, read by scrolling it).",
             "type": "string"
           },
+          "incarnation": {
+            "description": "The program's incarnation when the text was read, under the same lock\nas the text. Absent for a terminal that never started a program.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "text": {
             "type": "string"
+          },
+          "truncated": {
+            "description": "`max_bytes` cut the text: older lines were dropped.",
+            "type": "boolean"
           },
           "why": {
             "description": "Why only the screen: \"working\", \"blocked\" or \"error\" (a full-screen app\nis not scrolled in these states).",
@@ -914,6 +925,11 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "ctx": {
+            "default": "",
+            "description": "`<nonce of this core process>-<counter>`: moves when a person or an\nagent types into it (`send`, `keys`, a viewer's real input, never a\nterminal's own replies), when its program's status report changes\n(state, kind, message, title; not the terminal title, not progress)\nand whenever a program starts. In memory only: a core restart gives a\nnew one (the saved value is never read back).",
+            "type": "string"
           },
           "cwd": {
             "type": "string"
@@ -974,6 +990,14 @@
             "default": "",
             "description": "Which terminal the program believes it runs in (TERM_PROGRAM and\nversion), fixed at start; XTVERSION answers with it.",
             "type": "string"
+          },
+          "incarnation": {
+            "default": null,
+            "description": "16 random hex characters, new each time a program is successfully\nstarted in it (created, restarted, kept recovery). Saved. A terminal\nsaved by an older core gets one when this core first loads it. Null\nuntil its first program has started.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "keep": {
             "default": false,
@@ -1477,6 +1501,11 @@
             "minimum": 0,
             "type": "integer"
           },
+          "ctx": {
+            "default": "",
+            "description": "`<nonce of this core process>-<counter>`: moves when a person or an\nagent types into it (`send`, `keys`, a viewer's real input, never a\nterminal's own replies), when its program's status report changes\n(state, kind, message, title; not the terminal title, not progress)\nand whenever a program starts. In memory only: a core restart gives a\nnew one (the saved value is never read back).",
+            "type": "string"
+          },
           "cwd": {
             "type": "string"
           },
@@ -1536,6 +1565,14 @@
             "default": "",
             "description": "Which terminal the program believes it runs in (TERM_PROGRAM and\nversion), fixed at start; XTVERSION answers with it.",
             "type": "string"
+          },
+          "incarnation": {
+            "default": null,
+            "description": "16 random hex characters, new each time a program is successfully\nstarted in it (created, restarted, kept recovery). Saved. A terminal\nsaved by an older core gets one when this core first loads it. Null\nuntil its first program has started.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "keep": {
             "default": false,
@@ -2797,7 +2834,7 @@
       }
     },
     {
-      "description": "The screen plus `lines` of history as text, live or finished.",
+      "description": "The screen plus `lines` of history as text, live or finished. Feature `read-bounded`: `max_bytes` bounds the JSON-escaped text (oldest lines dropped, `truncated`); `stitch: false` never scrolls a full-screen program; only the `lines` rows asked for are formatted; the result's `incarnation` is read under the same lock as the text.",
       "errors": [
         {
           "code": -32000,
@@ -2837,6 +2874,29 @@
             "format": "uint",
             "minimum": 0,
             "type": "integer"
+          }
+        },
+        {
+          "description": "Feature `read-bounded`: at most this many bytes of `text`, counted as\nJSON-escaped (what goes on the wire). The oldest lines are dropped to\nfit and the result says `truncated`.",
+          "name": "max_bytes",
+          "required": false,
+          "schema": {
+            "description": "Feature `read-bounded`: at most this many bytes of `text`, counted as\nJSON-escaped (what goes on the wire). The oldest lines are dropped to\nfit and the result says `truncated`.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "Feature `read-bounded`: false never scrolls a full-screen program to\nread its history (its screen is read as it is).",
+          "name": "stitch",
+          "required": false,
+          "schema": {
+            "description": "Feature `read-bounded`: false never scrolls a full-screen program to\nread its history (its screen is read as it is).",
+            "type": "boolean"
           }
         },
         {
@@ -3100,7 +3160,7 @@
       }
     },
     {
-      "description": "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min, counted from when it arrives, for them to send or clear it; a draft backspaced away is no draft, and one nobody typed on for 10 min, or whose viewer detached 1 min ago with none left, expires; terminal.get shows it as `draft`); keys a person presses meanwhile are held, then delivered. A send still waiting when its caller goes away (its `hc` was killed, its connection hung up) is dropped: nothing is typed. A client that only stops writing, as `hc connect` does when its stdin ends, still gets its answer. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
+      "description": "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min, counted from when it arrives, for them to send or clear it; a draft backspaced away is no draft, and one nobody typed on for 10 min, or whose viewer detached 1 min ago with none left, expires; terminal.get shows it as `draft`); keys a person presses meanwhile are held, then delivered. A send still waiting when its caller goes away (its `hc` was killed, its connection hung up) is dropped: nothing is typed. A client that only stops writing, as `hc connect` does when its stdin ends, still gets its answer. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed. Guarded (feature `send-guarded`, with `incarnation` and `if_ctx`, and `within_ms` at most 15000, default 10000): it types only if the terminal still runs that incarnation (else `replaced`), its `ctx` is still `if_ctx` (else `context_changed`: someone typed into it, or its status report changed) and it isn't blocked (`blocked`, `force` is not allowed), and it never waits longer than `within_ms` for a person or a draft (`busy`); those four refusals type nothing. A guarded send always types, whatever follows the inbox. It holds the terminal's input from that check until its submit key: a person's keys wait and go in after it. Every write goes to the program checked; if a write fails, or anything but the paste reached the program before the submit key, it answers `unknown` and sends no submit key: the text may be sitting unsent in the program's input box, where a later Enter would submit it. Its caller leaving before it types ends it, as for any send.",
       "errors": [
         {
           "code": -32000,
@@ -3164,6 +3224,34 @@
             "kind": "config"
           },
           "message": "config"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "replaced"
+          },
+          "message": "replaced"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "context_changed"
+          },
+          "message": "context_changed"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "busy"
+          },
+          "message": "busy"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "unknown"
+          },
+          "message": "unknown"
         }
       ],
       "name": "terminal.send",
@@ -3208,6 +3296,30 @@
           }
         },
         {
+          "description": "Guarded send: type only if the terminal's `ctx` is still this (nobody\nhas typed into it and its status report hasn't changed), else refuse\nwith `context_changed`.",
+          "name": "if_ctx",
+          "required": false,
+          "schema": {
+            "description": "Guarded send: type only if the terminal's `ctx` is still this (nobody\nhas typed into it and its status report hasn't changed), else refuse\nwith `context_changed`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "Guarded send (feature `send-guarded`; needs `--if-ctx`): type only if\nthe terminal still runs this incarnation, else refuse with `replaced`.",
+          "name": "incarnation",
+          "required": false,
+          "schema": {
+            "description": "Guarded send (feature `send-guarded`; needs `--if-ctx`): type only if\nthe terminal still runs this incarnation, else refuse with `replaced`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
           "description": "The terminal: `t7`, a name, or `machine/t7`.",
           "name": "terminal",
           "required": true,
@@ -3246,6 +3358,20 @@
             "default": false,
             "description": "Then wait for the turn this send started.",
             "type": "boolean"
+          }
+        },
+        {
+          "description": "Guarded send: the longest it waits for a person's typing or draft, or\nfor its turn, in ms (at most 15000, default 10000); then `busy`.",
+          "name": "within_ms",
+          "required": false,
+          "schema": {
+            "description": "Guarded send: the longest it waits for a person's typing or draft, or\nfor its turn, in ms (at most 15000, default 10000); then `busy`.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         }
       ],

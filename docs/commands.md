@@ -495,9 +495,11 @@ Arguments:
   [TERMINAL]  The terminal: `t7`, a name, or `machine/t7`
 
 Options:
-      --json           JSON output even in a terminal
-      --lines <LINES>  Lines of history above the screen [default: 0]
-  -h, --help           Print help
+      --json               JSON output even in a terminal
+      --lines <LINES>      Lines of history above the screen [default: 0]
+      --max-bytes <BYTES>  Feature `read-bounded`: at most this many bytes of `text`, counted as JSON-escaped (what goes on the wire). The oldest lines are dropped to fit and the result says `truncated`
+      --stitch <BOOL>      Feature `read-bounded`: false never scrolls a full-screen program to read its history (its screen is read as it is) [default: true] [possible values: true, false]
+  -h, --help               Print help
 ```
 
 ## hc rm
@@ -566,16 +568,19 @@ Arguments:
   <TEXT>      Pasted, then submitted with Enter
 
 Options:
-      --force              Type even if the program is blocked (it may answer its dialog)
-      --json               JSON output even in a terminal
-      --if <STATUS>        Only type if the status is exactly this [possible values: idle, working]
-      --wait               Then wait for the turn this send started
-      --timeout <TIMEOUT>  With wait: seconds before it checks in (default: config, else 180)
-      --inbox-only         Only queue it in the terminal's inbox: if its program doesn't follow its inbox, fail with `not_following` instead of typing. This machine's terminals only
-      --key <KEY>          With --inbox-only: this message's key. Sent again with the same key (after a lost answer), it isn't queued twice
-      --key-since <MS>     With --key: when it was first sent (ms since the epoch). A key the terminal may have forgotten since is refused, not queued again
-      --core <CORE>        With --inbox-only: only if this core (its id, from `server status`) is the one running; another refuses (`other_core`)
-  -h, --help               Print help
+      --force                      Type even if the program is blocked (it may answer its dialog)
+      --json                       JSON output even in a terminal
+      --if <STATUS>                Only type if the status is exactly this [possible values: idle, working]
+      --wait                       Then wait for the turn this send started
+      --timeout <TIMEOUT>          With wait: seconds before it checks in (default: config, else 180)
+      --inbox-only                 Only queue it in the terminal's inbox: if its program doesn't follow its inbox, fail with `not_following` instead of typing. This machine's terminals only
+      --key <KEY>                  With --inbox-only: this message's key. Sent again with the same key (after a lost answer), it isn't queued twice
+      --key-since <MS>             With --key: when it was first sent (ms since the epoch). A key the terminal may have forgotten since is refused, not queued again
+      --core <CORE>                With --inbox-only: only if this core (its id, from `server status`) is the one running; another refuses (`other_core`)
+      --incarnation <INCARNATION>  Guarded send (feature `send-guarded`; needs `--if-ctx`): type only if the terminal still runs this incarnation, else refuse with `replaced`
+      --if-ctx <IF_CTX>            Guarded send: type only if the terminal's `ctx` is still this (nobody has typed into it and its status report hasn't changed), else refuse with `context_changed`
+      --within-ms <MS>             Guarded send: the longest it waits for a person's typing or draft, or for its turn, in ms (at most 15000, default 10000); then `busy`
+  -h, --help                       Print help
 ```
 
 ## hc server
