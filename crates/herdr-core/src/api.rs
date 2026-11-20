@@ -28,6 +28,9 @@ pub const FEATURES: &[&str] = &[
     "resize_history",
     "attach_credit",
     "focus_by_use",
+    "incarnation",
+    "send-guarded",
+    "read-bounded",
 ];
 pub const FINISHED_LINES: usize = 1000;
 /// A terminal's identity: fixed at start from whoever starts it.
@@ -111,14 +114,14 @@ methods! { Ctx<'_>;
         "Set or remove labels (free-form `key=value`, never interpreted).",
         errors ["not_found", "machine_unknown", "invalid_params"];
     "terminal.read" => terminal_read, ReadParams => ReadResult,
-        "The screen plus `lines` of history as text, live or finished.",
+        "The screen plus `lines` of history as text, live or finished. Feature `read-bounded`: `max_bytes` bounds the JSON-escaped text (oldest lines dropped, `truncated`); `stitch: false` never scrolls a full-screen program; only the `lines` rows asked for are formatted; the result's `incarnation` is read under the same lock as the text.",
         errors ["not_found", "machine_unknown"];
     "terminal.attach" => terminal_attach, AttachParams => AttachResult,
         "Open a raw stream to a live terminal on this framed connection (see `hello` with `framed`). Loss ends the stream even when kept; reattach after the restarted event.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "needs_framed"];
     "terminal.send" => terminal_send, SendParams => SendResult,
-        "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min, counted from when it arrives, for them to send or clear it; a draft backspaced away is no draft, and one nobody typed on for 10 min, or whose viewer detached 1 min ago with none left, expires; terminal.get shows it as `draft`); keys a person presses meanwhile are held, then delivered. A send still waiting when its caller goes away (its `hc` was killed, its connection hung up) is dropped: nothing is typed. A client that only stops writing, as `hc connect` does when its stdin ends, still gets its answer. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
-        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "drafting", "invalid_params", "config"];
+        "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min, counted from when it arrives, for them to send or clear it; a draft backspaced away is no draft, and one nobody typed on for 10 min, or whose viewer detached 1 min ago with none left, expires; terminal.get shows it as `draft`); keys a person presses meanwhile are held, then delivered. A send still waiting when its caller goes away (its `hc` was killed, its connection hung up) is dropped: nothing is typed. A client that only stops writing, as `hc connect` does when its stdin ends, still gets its answer. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed. Guarded (feature `send-guarded`, with `incarnation` and `if_ctx`, and `within_ms` at most 15000, default 10000): it types only if the terminal still runs that incarnation (else `replaced`), its `ctx` is still `if_ctx` (else `context_changed`: someone typed into it, or its status report changed) and it isn't blocked (`blocked`, `force` is not allowed), and it never waits longer than `within_ms` for a person or a draft (`busy`); those four refusals type nothing. A guarded send always types, whatever follows the inbox. It holds the terminal's input from that check until its submit key: a person's keys wait and go in after it. Every write goes to the program checked; if a write fails, or anything but the paste reached the program before the submit key, it answers `unknown` and sends no submit key: the text may be sitting unsent in the program's input box, where a later Enter would submit it. Its caller leaving before it types ends it, as for any send.",
+        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "drafting", "invalid_params", "config", "replaced", "context_changed", "busy", "unknown"];
     "terminal.queue" => terminal_queue, QueueParams => SendResult,
         "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal within `queue_keys_kept_ms` (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. With `key_since` (when the key was first sent) before the terminal's keys go back, it may have been queued and forgotten: refused with `key_forgotten`, never queued again. With `core`, only that core queues it (`other_core` otherwise). This machine's terminals only.",
         errors ["not_found", "machine_unknown", "not_following", "other_core", "key_forgotten", "invalid_params"];
@@ -455,27 +458,47 @@ async fn terminal_label(core: Ctx<'_>, p: LabelParams) -> Result<Public, RpcErro
 async fn terminal_read(core: Ctx<'_>, p: ReadParams) -> Result<ReadResult, RpcError> {
     let id = resolve(core, &p.terminal)?;
     core.saw(p.caller.as_deref(), id);
+    // `max_bytes` or `stitch: false` (feature `read-bounded`): only the rows asked for are formatted.
+    let bounded = p.max_bytes.is_some() || !p.stitch;
+    let incarnation = |core: &Core| core.lock().reg.terminals.get(&id).and_then(|t| t.incarnation.clone());
     // A full-screen app keeps its history to itself: scroll it to read it.
     let full_screen = core.lock().screens.get(&id).is_some_and(|s| s.alt_screen());
     if full_screen && p.lines > 0 {
         let lines = p.lines.min(FINISHED_LINES);
-        let result = match core.stitch(id, lines).await {
-            Some((text, complete)) => ReadResult { text, complete, how: "stitched".into(), why: None },
+        let stitched = if p.stitch {
+            let before = incarnation(core);
+            core.stitch(id, lines).await.map(|stitched| (stitched, before))
+        } else {
+            None
+        };
+        let result = match stitched {
+            Some(((text, complete), before)) => {
+                // Not one lock: the same incarnation before and after, or none is claimed.
+                let after = incarnation(core);
+                ReadResult {
+                    text,
+                    complete,
+                    how: "stitched".into(),
+                    why: None,
+                    truncated: false,
+                    incarnation: after.filter(|a| Some(a) == before.as_ref()),
+                }
+            }
             None => {
                 let st = core.lock();
                 let text = st.screens.get(&id).map(|s| crate::stitch::text(&s.screen_rows())).unwrap_or_default();
-                let why = st
-                    .reg
-                    .terminals
-                    .get(&id)
+                let t = st.reg.terminals.get(&id);
+                let why = t
                     .and_then(|t| t.status.as_ref())
+                    .filter(|_| p.stitch)
                     .filter(|s| matches!(s.state.as_str(), "working" | "blocked" | "error"))
                     .map(|s| s.state.clone());
-                ReadResult { text, complete: false, how: "screen".into(), why }
+                let incarnation = t.and_then(|t| t.incarnation.clone());
+                ReadResult { text, complete: false, how: "screen".into(), why, truncated: false, incarnation }
             }
         };
         core.flush_saved().await?;
-        return Ok(result);
+        return Ok(bound(result, p.max_bytes));
     }
     let result = {
         let st = core.lock();
@@ -483,7 +506,10 @@ async fn terminal_read(core: Ctx<'_>, p: ReadParams) -> Result<ReadResult, RpcEr
         let lines = if t.is_live() { p.lines } else { p.lines.min(FINISHED_LINES) };
         let rows = t.rows as usize;
         let exact = t.screen == "exact";
-        let text = core.screen_text(&st, id);
+        let text = match st.screens.get(&id) {
+            Some(screen) if bounded => Some(screen.plain_tail(lines)),
+            _ => core.screen_text(&st, id),
+        };
         let mut complete = exact && text.is_some();
         let text = text.unwrap_or_default();
         let all: Vec<&str> = text.trim_end_matches('\n').lines().collect();
@@ -501,10 +527,43 @@ async fn terminal_read(core: Ctx<'_>, p: ReadParams) -> Result<ReadResult, RpcEr
             complete,
             how: if p.lines == 0 { "screen" } else { "history" }.into(),
             why: None,
+            truncated: false,
+            incarnation: t.incarnation.clone(),
         }
     };
     core.flush_saved().await?;
-    Ok(result)
+    Ok(bound(result, p.max_bytes))
+}
+
+/// The JSON-escaped size of `line` as it goes on the wire (without its quotes).
+fn escaped_len(line: &str) -> usize {
+    serde_json::to_string(line).map_or(line.len(), |s| s.len() - 2)
+}
+
+/// Keeps the newest whole lines of `result.text` whose JSON-escaped text fits
+/// `max_bytes` (a newline is the two bytes `\n`); the oldest are dropped and
+/// the result says `truncated`. A last line that alone is too long is dropped
+/// too: a bound is a bound.
+pub(crate) fn bound(mut result: ReadResult, max_bytes: Option<usize>) -> ReadResult {
+    let Some(max) = max_bytes else { return result };
+    if escaped_len(&result.text) <= max {
+        return result;
+    }
+    let lines: Vec<&str> = result.text.split('\n').collect();
+    let (mut used, mut keep) = (0usize, 0usize);
+    for line in lines.iter().rev() {
+        // This line, and the newline that joins it to the one kept before it.
+        let cost = escaped_len(line) + if keep > 0 { 2 } else { 0 };
+        if used + cost > max {
+            break;
+        }
+        used += cost;
+        keep += 1;
+    }
+    result.text = lines[lines.len() - keep..].join("\n");
+    result.truncated = true;
+    result.complete = false;
+    result
 }
 
 async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult, RpcError> {
@@ -541,7 +600,7 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
         idle_ms: p.idle_ms,
         desktop_group: core.desktop_group(conn, p.desktop_group.as_deref()),
     };
-    let channel = core.attach(conn, id, req)?;
+    let (channel, terminal) = core.attach_record(conn, id, req)?;
     if let Some(credit) = p.credit {
         // Still paused: nothing has gone out on it yet.
         conn.with(|out| out.set_credit(channel, credit as usize));
@@ -549,7 +608,7 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
     attach_gate(p.resumed, p.credit).await;
     Ok(AttachResult {
         channel,
-        terminal: Public(record(core, id)?),
+        terminal: Public(terminal),
         resize_notifications: p.resize_notifications,
         visibility_updates: p.visibility_updates,
         focus_updates: p.focus_updates,
@@ -601,23 +660,55 @@ async fn terminal_queue(core: Ctx<'_>, p: QueueParams) -> Result<SendResult, Rpc
         key: p.key,
         key_since: p.key_since,
         core: None,
+        incarnation: None,
+        if_ctx: None,
+        within_ms: None,
         caller: p.caller,
     };
     terminal_send(core, send).await
 }
 
+/// The longest a guarded send may wait for a person, a draft or its turn.
+const WITHIN_MAX_MS: u64 = 15_000;
+const WITHIN_DEFAULT_MS: u64 = 10_000;
+
+/// The guard of a send, if it has one: `incarnation` and `if_ctx` come together,
+/// `within_ms` only with them.
+fn guard(p: &SendParams) -> Result<Option<crate::input::Guard>, RpcError> {
+    match (&p.incarnation, &p.if_ctx, p.within_ms) {
+        (None, None, None) => Ok(None),
+        (Some(incarnation), Some(if_ctx), within) => {
+            let within = within.unwrap_or(WITHIN_DEFAULT_MS);
+            if within > WITHIN_MAX_MS {
+                return Err(RpcError::invalid_params(format!("within_ms is at most {WITHIN_MAX_MS}")));
+            }
+            if p.force {
+                return Err(RpcError::invalid_params("a guarded send never forces: it refuses a blocked program"));
+            }
+            Ok(Some(crate::input::Guard {
+                incarnation: incarnation.clone(),
+                if_ctx: if_ctx.clone(),
+                within: Duration::from_millis(within),
+            }))
+        }
+        _ => Err(RpcError::invalid_params("incarnation and if_ctx go together (and within_ms only with them)")),
+    }
+}
+
 async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcError> {
     let timeout = wait_timeout(core, p.timeout)?; // checked before anything is typed
+    guard(&p)?;
     let id = resolve(core, &p.terminal)?;
     let text = core.tagged(p.caller.as_deref(), id, &p.text, false);
     let from = p.caller.clone().filter(|c| crate::terminals::parse_id(c).is_some() || c.contains('/'));
     let only_if = p.only_if.map(|w| word(&w));
     let since = p.key_since.unwrap_or_else(crate::runtime::now_ms);
     let key = p.key.as_deref().map(|key| crate::inbox::QueueKey { key, since });
-    let sent = core
-        .send_or_queue(id, from, &text, p.force, only_if.as_deref(), p.inbox_only, key, &core.gone)
-        .await
-        .inspect_err(logged_if_dropped("terminal.send", &p.terminal, p.caller.as_deref()))?;
+    let sent = match guard(&p)? {
+        Some(guard) => core.send_guarded(id, &text, only_if.as_deref(), guard, &core.gone).await,
+        None => core.send_or_queue(id, from, &text, p.force, only_if.as_deref(), p.inbox_only, key, &core.gone).await,
+    }
+    .inspect_err(logged_if_dropped("terminal.send", &p.terminal, p.caller.as_deref()))?;
     if let Some(child) = p.caller.as_deref().and_then(crate::terminals::parse_id) {
         let mut st = core.lock();
         if let Some(c) = st

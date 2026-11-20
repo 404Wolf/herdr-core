@@ -230,6 +230,18 @@ impl Core {
 
     /// Adds a viewer: queues the first paint, then every live byte follows in order.
     pub fn attach(&self, conn: &Arc<Conn>, id: u32, req: AttachRequest) -> Result<u32, RpcError> {
+        self.attach_record(conn, id, req).map(|(channel, _)| channel)
+    }
+
+    /// [`Core::attach`], and the terminal's record as it was in the same
+    /// critical section that queued the first paint: its `incarnation` and
+    /// `ctx` are those of the program the paint shows.
+    pub fn attach_record(
+        &self,
+        conn: &Arc<Conn>,
+        id: u32,
+        req: AttachRequest,
+    ) -> Result<(u32, crate::terminals::Terminal), RpcError> {
         let mut st = self.lock();
         if let Some(t) = st.reg.terminals.get(&id) {
             t.check_program()?;
@@ -308,7 +320,7 @@ impl Core {
                 out.mark_history_lost(channel);
             }
         });
-        Ok(channel)
+        Ok((channel, st.reg.terminals[&id].clone()))
     }
 
     /// Program output: through the relay to the screen and every viewer,
@@ -450,13 +462,14 @@ impl Core {
         if first_task_finished {
             t.first_task_turn = None;
         }
-        let (status, records, turn, reported) = (t.status.clone(), t.records.clone(), t.turn, t.reported);
+        let (status, records, turn, reported, ctx) =
+            (t.status.clone(), t.records.clone(), t.turn, t.reported, t.ctx.clone());
         if change.status {
             self.emit(
                 st,
                 "status",
                 id,
-                serde_json::json!({"status": status, "records": records, "reported": reported}),
+                serde_json::json!({"status": status, "records": records, "reported": reported, "ctx": ctx}),
             );
         }
         if change.turn_ended {
@@ -515,6 +528,12 @@ impl Core {
                 peer: v.peer.clone(),
             });
             let person = !automatic && !bytes.is_empty();
+            let held = st.gates.get(&id).is_some_and(|g| g.is_busy());
+            if person && let Some(t) = st.reg.terminals.get_mut(&id) {
+                // Under the same lock as a guarded send's fence: either the send sees the
+                // new `ctx` and refuses, or these bytes are held until it has typed.
+                if held { t.bump_ctx_held() } else { t.bump_ctx() }
+            }
             let now = st.gates.entry(id).or_default().input(bytes, human, person, by);
             if let Some(link) = st.link(id) {
                 link.input(id, &now);

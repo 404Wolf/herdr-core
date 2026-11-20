@@ -95,7 +95,34 @@ fn stamp(t: &mut Terminal, was: Option<String>) {
     }
 }
 
+/// Whether two reports say the same: what moves a terminal's `ctx` is the
+/// report's state, kind, message and title (its progress and app name tick
+/// without anything having changed for a person).
+fn same_report(a: &Status, b: &Status) -> bool {
+    (&a.state, &a.kind, &a.msg, &a.title) == (&b.state, &b.kind, &b.msg, &b.title)
+}
+
+fn same_reports(a: Option<&Status>, b: Option<&Status>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => same_report(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 pub fn apply(t: &mut Terminal, r: &StatusReport) -> Change {
+    let before = (t.status.clone(), t.records.clone());
+    let change = apply_report(t, r);
+    let moved = !same_reports(before.0.as_ref(), t.status.as_ref())
+        || before.1.len() != t.records.len()
+        || before.1.iter().any(|(id, s)| !same_reports(Some(s), t.records.get(id)));
+    if moved {
+        t.bump_ctx();
+    }
+    change
+}
+
+fn apply_report(t: &mut Terminal, r: &StatusReport) -> Change {
     let (was_working, was_word) = (working(t), word(t));
     let was = stuck(t).map(String::from);
     t.reported = true;
@@ -130,6 +157,9 @@ pub fn apply(t: &mut Terminal, r: &StatusReport) -> Change {
 pub fn reset(t: &mut Terminal) -> Change {
     let (was_working, was_word) = (working(t), word(t));
     let had = t.status.is_some() || !t.records.is_empty();
+    if had {
+        t.bump_ctx();
+    }
     t.status = None;
     t.records.clear();
     stamp(t, was_word);

@@ -136,6 +136,17 @@ impl Link {
             self.send(&proto::frame(proto::INPUT, id, bytes));
         }
     }
+
+    /// [`Link::input`] that says whether the frame was handed to the holder's
+    /// writer: false once the link is down (its writer thread ended on a write error).
+    pub fn try_input(&self, id: u32, bytes: &[u8]) -> bool {
+        bytes.is_empty() || self.writer.send(proto::frame(proto::INPUT, id, bytes)).is_ok()
+    }
+
+    /// Whether the link's writer is still there: an earlier frame that failed ended it.
+    pub fn alive(&self) -> bool {
+        self.writer.send(Vec::new()).is_ok()
+    }
 }
 
 const SAVE_SOON: Duration = Duration::from_secs(2);
@@ -162,7 +173,16 @@ fn finish_reason(killed: bool, stopping: bool, host_shutdown: bool) -> &'static 
 
 impl Core {
     pub fn start(paths: Paths, info: CoreInfo) -> io::Result<Arc<Core>> {
-        let reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        let mut reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        // A core that predates `incarnation` left live terminals without one: give each its
+        // own now (a core switch keeps programs in their holders, so all of them lack it),
+        // saved by the first save after adoption. Every `ctx` is this process's own.
+        for t in reg.terminals.values_mut() {
+            if t.is_live() && t.incarnation.is_none() {
+                t.incarnation = Some(crate::terminals::new_incarnation());
+            }
+            t.bump_ctx();
+        }
         let docs_path = paths.state.join("docs.json");
         let docs = read_state(&docs_path).unwrap_or_else(|e| {
             crate::log!("core: cannot load documents, starting empty: {e}");
@@ -678,6 +698,9 @@ impl Core {
                 let restarted = t.reason.is_some();
                 t.pid = Some(pid);
                 t.program_started_ms = Some(now_ms());
+                // A new program: nothing decided about the old one holds for it.
+                t.incarnation = Some(crate::terminals::new_incarnation());
+                t.bump_ctx();
                 t.reason = None;
                 t.exit_code = None;
                 t.signal = None;

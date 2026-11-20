@@ -122,6 +122,11 @@ pub struct DraftView {
 }
 
 impl Gate {
+    /// An agent's input is going in right now: viewer input is held.
+    pub fn is_busy(&self) -> bool {
+        self.busy
+    }
+
     /// A person pressed keys while an agent's input was going in.
     pub fn has_held(&self) -> bool {
         self.held_human
@@ -978,6 +983,9 @@ impl Core {
             t.check_program()?;
             let prepared = prepare(&st, t)?;
             st.gates.entry(id).or_default().busy = true;
+            if let Some(t) = st.reg.terminals.get_mut(&id) {
+                t.bump_ctx();
+            }
             prepared
         };
         for step in steps {
@@ -1194,6 +1202,244 @@ impl Core {
             link.send(&proto::frame(proto::FOREGROUND, id, &[]));
         }
         tokio::time::timeout(Duration::from_secs(1), rx).await.ok().and_then(Result::ok).unwrap_or(-1)
+    }
+}
+
+
+/// The checks of a guarded `terminal.send` (see [`Core::send_guarded`]).
+pub struct Guard {
+    /// The incarnation the caller meant (else `replaced`).
+    pub incarnation: String,
+    /// The `ctx` the caller last saw (else `context_changed`).
+    pub if_ctx: String,
+    /// How long it may wait for human quiet, a draft or its turn (else `busy`).
+    pub within: Duration,
+}
+
+/// The program a guarded send checked at its fence. Every write it makes goes
+/// to exactly this holder link and program, or nowhere.
+struct Verified {
+    instance: String,
+    pid: u32,
+    incarnation: String,
+}
+
+impl Verified {
+    /// The link to the holder of terminal `id`, only while it still runs the
+    /// program that was verified (same holder, process and incarnation).
+    fn link<'a>(&self, st: &'a State, id: u32) -> Option<&'a crate::runtime::Link> {
+        let t = st.reg.terminals.get(&id).filter(|t| t.is_live())?;
+        let same = t.holder.as_deref() == Some(self.instance.as_str())
+            && t.pid == Some(self.pid)
+            && t.incarnation.as_deref() == Some(self.incarnation.as_str());
+        same.then(|| st.holders.iter().find(|l| l.instance == self.instance)).flatten()
+    }
+}
+
+fn refusal(kind: &str, message: String) -> RpcError {
+    RpcError::new(kind, message, "nothing was typed")
+}
+
+/// Nothing was typed, though a deadline passed: `busy`.
+fn busy(id: u32, within: Duration, why: &str) -> RpcError {
+    refusal(
+        "busy",
+        format!("{} was {why} for the whole {} ms it was given", crate::terminals::address(id), within.as_millis()),
+    )
+}
+
+/// The write went wrong, or the program it was for changed under it.
+fn unknown(id: u32, what: &str) -> RpcError {
+    RpcError::new(
+        "unknown",
+        format!("{}: {what}", crate::terminals::address(id)),
+        "the text may have been typed whole, partly, or not at all, and may be sitting unsent in the program's input \
+         box, where any later Enter would submit it; no submit key was sent after this and nothing was typed again. \
+         Look at the terminal before sending anything else",
+    )
+}
+
+impl Core {
+    /// The guarded send. Types `text` and submits it only if, at the moment of
+    /// typing, the terminal still runs the program the caller meant
+    /// (`guard.incarnation`), nobody and nothing has typed into it or changed
+    /// its status report since the caller read `guard.if_ctx`, and it isn't
+    /// blocked. Refusals (`replaced`, `context_changed`, `blocked`, `busy`)
+    /// type nothing.
+    ///
+    /// The fence is one critical section under the state lock, which every
+    /// viewer's input also takes: the checks, the new `ctx` and the input gate
+    /// closing happen together, so a person's keys either came first (the
+    /// `ctx` differs: refused) or are held until the submit key is out, and
+    /// delivered after it. The paste, the pause and a check that nothing but
+    /// the paste arrived (the `ctx` is still the one the paste made, the
+    /// program and its holder link are the ones verified, no keys were held)
+    /// all happen with the gate closed; a failure anywhere on the way answers
+    /// `unknown` and sends no submit key, and nothing is typed again.
+    pub async fn send_guarded(
+        &self,
+        id: u32,
+        text: &str,
+        only_if: Option<&str>,
+        guard: Guard,
+        gone: &Gone,
+    ) -> Result<Sent, RpcError> {
+        let arrived = Instant::now();
+        let deadline = tokio::time::Instant::now() + guard.within;
+        // The checks that need no waiting; the fence repeats them.
+        self.guard_check(id, &guard, only_if)?;
+        tokio::select! {
+            settled = self.settle(id, gone) => settled?,
+            () = tokio::time::sleep_until(deadline) => return Err(busy(id, guard.within, "still starting")),
+        }
+        let queue = self.lock().queues.entry(id).or_default().clone();
+        let _turn = tokio::select! {
+            turn = queue.lock() => turn,
+            () = gone.ended() => return Err(dropped(arrived)),
+            () = tokio::time::sleep_until(deadline) => return Err(busy(id, guard.within, "in use by another send")),
+        };
+        // Wait for a person to have paused, and for their draft to be sent or
+        // cleared, but never past the deadline. Quiet counts from a person's
+        // last real input (not from a terminal's replies).
+        loop {
+            self.guard_check(id, &guard, only_if)?;
+            let (left, draft) = {
+                let mut st = self.lock();
+                let draft = crate::viewers::draft(&mut st, id);
+                let left = st.gates.get(&id).and_then(|g| g.last_typed).map(|t| quiet().saturating_sub(t.elapsed()));
+                (left, draft)
+            };
+            let (nap, why) = match (left, draft) {
+                (Some(left), _) if !left.is_zero() => (left, "typed on by a person"),
+                (_, Some(_)) => (DRAFT_POLL, "holding a person's unsent draft"),
+                _ => break,
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(busy(id, guard.within, why));
+            }
+            let wake = (tokio::time::Instant::now() + nap).min(deadline);
+            tokio::select! {
+                () = tokio::time::sleep_until(wake) => {}
+                () = gone.ended() => return Err(dropped(arrived)),
+            }
+        }
+        // The fence.
+        let (verified, bytes, submit, gap, own, word, turn, reported) = {
+            let mut st = self.lock();
+            if gone.is_gone() {
+                return Err(dropped(arrived));
+            }
+            let (verified, word, turn, reported) = self.fence(&st, id, &guard, only_if)?;
+            let t = &st.reg.terminals[&id];
+            let screen = st.screens.get(&id).ok_or_else(|| refusal("finished", "it has finished".into()))?;
+            let submit = match &t.submit {
+                Some(key) => crate::keys::encode(screen, key)?,
+                None => b"\r".to_vec(),
+            };
+            let gap = t.paste_gap_ms.map_or(PASTE_GAP, Duration::from_millis);
+            let bytes = paste(screen.dec_mode(2004), text);
+            let t = st.reg.terminals.get_mut(&id).expect("checked");
+            t.bump_ctx();
+            let own = t.arrivals();
+            st.gates.entry(id).or_default().set_busy(true);
+            (verified, bytes, submit, gap, own, word, turn, reported)
+        };
+        // From here on it is finished, whatever the caller does.
+        let wrote = |bytes: &[u8]| self.lock().verified_write(&verified, id, bytes);
+        let mut failed = (!wrote(&bytes)).then_some("the paste could not be written to the program it was checked against");
+        if failed.is_none() {
+            tokio::time::sleep(gap).await;
+            // Nothing but our own paste may have arrived.
+            let ok = {
+                let st = self.lock();
+                // A person's held keys have not reached the program, and go in after the submit.
+                let same = st.reg.terminals.get(&id).is_some_and(|t| t.arrivals() == own);
+                verified.link(&st, id).is_some_and(|l| l.alive()) && same
+            };
+            if !ok {
+                failed = Some("something else reached the program, or the program changed, before the submit key");
+            } else if !wrote(&submit) {
+                failed = Some("the submit key could not be written to the program it was checked against");
+            }
+        }
+        {
+            let mut st = self.lock();
+            let gate = st.gates.entry(id).or_default();
+            gate.typed(failed.is_none());
+            let held = gate.set_busy(false);
+            if let Some(link) = verified.link(&st, id) {
+                link.input(id, &held);
+            }
+        }
+        match failed {
+            Some(what) => Err(unknown(id, what)),
+            None => {
+                let started = self.started_after(id, turn, reported).await;
+                Ok(Sent { status: word, turn, started, via: "typed", waiting: None, repeated: false })
+            }
+        }
+    }
+
+    /// The refusals of a guarded send that need no lock held beyond this look.
+    fn guard_check(&self, id: u32, guard: &Guard, only_if: Option<&str>) -> Result<(), RpcError> {
+        self.fence(&self.lock(), id, guard, only_if).map(drop)
+    }
+
+    /// The fence's checks. Returns the program verified and its status word,
+    /// turn and whether it reports status.
+    fn fence(
+        &self,
+        st: &State,
+        id: u32,
+        guard: &Guard,
+        only_if: Option<&str>,
+    ) -> Result<(Verified, Option<String>, u64, bool), RpcError> {
+        let at = crate::terminals::address(id);
+        let t = st
+            .reg
+            .terminals
+            .get(&id)
+            .filter(|t| t.is_live())
+            .ok_or_else(|| RpcError::new("finished", format!("{at} has finished"), format!("hc read {at}")))?;
+        t.check_program()?;
+        if t.incarnation.as_deref() != Some(guard.incarnation.as_str()) {
+            return Err(refusal(
+                "replaced",
+                format!("{at} runs another program now (incarnation {})", t.incarnation.as_deref().unwrap_or("none")),
+            ));
+        }
+        if t.ctx != guard.if_ctx {
+            return Err(refusal(
+                "context_changed",
+                format!("{at} changed since it was read: its ctx is {}, not {}", t.ctx, guard.if_ctx),
+            ));
+        }
+        let word = state_word(t);
+        if word.as_deref() == Some("blocked") {
+            return Err(refusal(
+                "blocked",
+                format!(
+                    "{at} is blocked ({}); typing would answer its dialog",
+                    t.status.as_ref().and_then(|s| s.kind.as_deref()).unwrap_or("waiting")
+                ),
+            ));
+        }
+        check_status(id, word.as_deref(), only_if)?;
+        let (Some(instance), Some(pid)) = (t.holder.clone(), t.pid) else {
+            return Err(refusal("unavailable", format!("{at} has no running program")));
+        };
+        if !st.holders.iter().any(|l| l.instance == instance) {
+            return Err(refusal("unavailable", format!("the holder of {at} is not connected")));
+        }
+        Ok((Verified { instance, pid, incarnation: guard.incarnation.clone() }, word, t.turn, t.reported))
+    }
+}
+
+impl State {
+    /// Writes to the program `at` verified, if it is still the one running
+    /// there and its holder link takes the bytes.
+    fn verified_write(&self, at: &Verified, id: u32, bytes: &[u8]) -> bool {
+        at.link(self, id).is_some_and(|l| l.try_input(id, bytes))
     }
 }
 

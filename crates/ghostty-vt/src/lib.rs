@@ -769,6 +769,29 @@ impl Terminal {
         String::from_utf8_lossy(&self.format(ffi::FORMAT_PLAIN, None, false)).into_owned()
     }
 
+    /// [`Terminal::plain_text`] of the screen and at most the last `history`
+    /// rows of scrollback above it: only those rows are formatted, so the
+    /// work does not grow with the history kept.
+    pub fn plain_tail(&self, history: usize) -> String {
+        let (cols, rows) = self.size();
+        let last = (cols.saturating_sub(1), rows.saturating_sub(1) as u32);
+        let available = self.history_rows();
+        let from = available.saturating_sub(u32::try_from(history).unwrap_or(u32::MAX));
+        let start = (history > 0 && available > 0 && !self.alt_screen())
+            .then(|| self.grid_ref(ffi::POINT_HISTORY, 0, from))
+            .flatten();
+        let sel = match start {
+            Some(start) => self
+                .grid_ref(ffi::POINT_ACTIVE, last.0, last.1)
+                .map(|end| ffi::Selection { size: size_of::<ffi::Selection>(), start, end, rectangle: false }),
+            None => self.select(ffi::POINT_ACTIVE, (0, 0), last),
+        };
+        match sel {
+            Some(sel) => String::from_utf8_lossy(&self.format(ffi::FORMAT_PLAIN, Some(&sel), false)).into_owned(),
+            None => String::new(),
+        }
+    }
+
     fn grid_ref(&self, tag: i32, x: u16, y: u32) -> Option<ffi::GridRef> {
         let point = ffi::Point { tag, value: ffi::PointValue { coord: ffi::Coord { x, y } } };
         let mut out = ffi::GridRef { size: size_of::<ffi::GridRef>(), node: ptr::null_mut(), x: 0, y: 0 };

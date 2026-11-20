@@ -124,6 +124,26 @@ pub struct Terminal {
     /// The holder (its instance) that runs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder: Option<String>,
+    /// 16 random hex characters, new each time a program is successfully
+    /// started in it (created, restarted, kept recovery). Saved. A terminal
+    /// saved by an older core gets one when this core first loads it. Null
+    /// until its first program has started.
+    #[serde(default)]
+    pub incarnation: Option<String>,
+    /// `<nonce of this core process>-<counter>`: moves when a person or an
+    /// agent types into it (`send`, `keys`, a viewer's real input, never a
+    /// terminal's own replies), when its program's status report changes
+    /// (state, kind, message, title; not the terminal title, not progress)
+    /// and whenever a program starts. In memory only: a core restart gives a
+    /// new one (the saved value is never read back).
+    #[serde(default)]
+    pub ctx: String,
+    #[serde(skip)]
+    ctx_seq: u64,
+    /// How many of those moves were a person's keys held while an agent's
+    /// input went in (they reach the program only after it).
+    #[serde(skip)]
+    held_bumps: u64,
     /// Template overrides: the key that submits a message, the stop key, the pause
     /// between paste and submit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,7 +179,38 @@ pub struct Terminal {
     pub draft: Option<crate::input::DraftView>,
 }
 
+/// This core process's own nonce: what makes a `ctx` from before a restart differ.
+fn process_nonce() -> &'static str {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NONCE.get_or_init(|| crate::platform::random_hex()[..8].to_string())
+}
+
+/// 16 random hex characters.
+pub fn new_incarnation() -> String {
+    crate::platform::random_hex()[..16].to_string()
+}
+
 impl Terminal {
+    /// Something happened that makes a decision taken on the old `ctx` stale.
+    pub fn bump_ctx(&mut self) {
+        self.ctx_seq += 1;
+        self.ctx = format!("{}-{}", process_nonce(), self.ctx_seq);
+    }
+
+    /// A person's keys, held while an agent's input goes in: `ctx` moves at once
+    /// (the next decision on the old one is stale), but they have not reached the program.
+    pub fn bump_ctx_held(&mut self) {
+        self.held_bumps += 1;
+        self.bump_ctx();
+    }
+
+    /// How many times something other than held keys moved `ctx`: what a
+    /// guarded send compares before its submit key to know nothing but its own
+    /// paste arrived (it has taken its own move into account).
+    pub fn arrivals(&self) -> u64 {
+        self.ctx_seq - self.held_bumps
+    }
+
     pub fn id(&self) -> u32 {
         parse_id(&self.address).expect("addresses are t<number>")
     }
@@ -330,8 +381,13 @@ impl Registry {
                 template: new.template.map(|t| t.name),
                 first_message: None,
                 holder: None,
+                incarnation: None,
+                ctx: String::new(),
+                ctx_seq: 0,
+                held_bumps: 0,
             },
         );
+        self.terminals.get_mut(&id).expect("just made").bump_ctx();
         Ok(id)
     }
 
