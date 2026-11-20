@@ -110,7 +110,7 @@ pub(super) async fn start(
     // A caller on another machine has no folder here: home, then.
     let from_afar = p.caller.as_deref().is_some_and(|c| c.contains('/'));
     let cwd = crate::exec::folder(p.cwd.as_deref(), from_afar);
-    let env = child_env(crate::platform::program_env().await, p.env.clone());
+    let env = child_env(crate::platform::program_env().await, p.env.clone())?;
     let identity = format!(
         "{} {}",
         env.get("TERM_PROGRAM").map_or("", String::as_str),
@@ -225,8 +225,11 @@ pub(crate) fn terminal_env(
 }
 
 /// The core's environment minus whoever started the core's identity, plus the
-/// caller's identity and this terminal's address.
-pub(crate) fn child_env(base: BTreeMap<String, String>, extra: BTreeMap<String, String>) -> BTreeMap<String, String> {
+/// caller's identity and the core's executable path.
+pub(crate) fn child_env(
+    base: BTreeMap<String, String>,
+    extra: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, RpcError> {
     let mut env: BTreeMap<String, String> = base
         .into_iter()
         .filter(|(k, _)| {
@@ -235,6 +238,10 @@ pub(crate) fn child_env(base: BTreeMap<String, String>, extra: BTreeMap<String, 
         })
         .collect();
     crate::platform::merge_env(&mut env, extra);
+    let exe = crate::client::executable().map_err(|e| RpcError::internal(format!("cannot determine HC_BIN: {e}")))?;
+    let exe = exe.to_str().ok_or_else(|| RpcError::internal("HC_BIN executable path is not valid Unicode"))?;
+    // Runtime-owned, even when the caller overrides it (case-insensitive on Windows).
+    crate::platform::merge_env(&mut env, [("HC_BIN".into(), exe.into())].into());
     if let Ok(session) = std::env::var("HC_SESSION") {
         env.insert("HC_SESSION".into(), session);
     }
@@ -247,7 +254,7 @@ pub(crate) fn child_env(base: BTreeMap<String, String>, extra: BTreeMap<String, 
         env.insert("TERM_PROGRAM".into(), "ghostty".into());
         env.remove("TERM_PROGRAM_VERSION"); // the version belonged to whatever we replaced
     }
-    env
+    Ok(env)
 }
 
 #[cfg(test)]
