@@ -3252,6 +3252,13 @@
             "kind": "unknown"
           },
           "message": "unknown"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "needs_update"
+          },
+          "message": "needs_update"
         }
       ],
       "name": "terminal.send",
