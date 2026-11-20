@@ -438,7 +438,6 @@ pub struct ReadResult {
     /// The program's incarnation when the text was read, under the same lock
     /// as the text. Absent for a terminal that never started a program.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incarnation: Option<String>,
 }
 
@@ -636,6 +635,7 @@ pub struct SendParams {
     /// the terminal still runs this incarnation, else refuse with `replaced`.
     #[arg(long, requires = "if_ctx", conflicts_with_all = ["force", "inbox_only"])]
     pub incarnation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Guarded send: type only if the terminal's `ctx` is still this (nobody
     /// has typed into it and its status report hasn't changed), else refuse
     /// with `context_changed`.
