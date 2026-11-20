@@ -634,8 +634,8 @@ pub struct SendParams {
     /// Guarded send (feature `send-guarded`; needs `--if-ctx`): type only if
     /// the terminal still runs this incarnation, else refuse with `replaced`.
     #[arg(long, requires = "if_ctx", conflicts_with_all = ["force", "inbox_only"])]
-    pub incarnation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
     /// Guarded send: type only if the terminal's `ctx` is still this (nobody
     /// has typed into it and its status report hasn't changed), else refuse
     /// with `context_changed`.
