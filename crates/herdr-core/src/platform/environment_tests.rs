@@ -53,3 +53,15 @@ fn windows_path_keys_are_matched_without_case() {
     assert_eq!(env.get(std::ffi::OsStr::new("HOME")), Some(&std::ffi::OsString::from("new")));
     assert_eq!(env.get(std::ffi::OsStr::new("Path")), Some(&std::ffi::OsString::from("saved")));
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_hc_bin_overrides_are_replaced_without_case() {
+    let env = crate::api::child_env(
+        [("hc_bin".into(), "stale".into())].into(),
+        [("Hc_Bin".into(), "override".into())].into(),
+    )
+    .unwrap();
+    assert_eq!(env.get("HC_BIN").unwrap(), std::env::current_exe().unwrap().to_str().unwrap());
+    assert_eq!(env.keys().filter(|key| key.eq_ignore_ascii_case("HC_BIN")).count(), 1);
+}

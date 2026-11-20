@@ -256,6 +256,13 @@ paths start at your current folder. Prefer explicit paths for remote work.
   `WAYLAND_DISPLAY` is left out only when its socket is missing or refuses
   connections. Host displays (including SSH forwarding) stay as they are.
   A missing `XAUTHORITY` file does not remove a display.
+- Every new terminal program and replacement recovery shell gets `HC_BIN`,
+  the absolute path of its core executable, obtained from `current_exe` at
+  core startup. Invoke it as `"$HC_BIN"` when PATH may point to another core.
+  Core supplies it alongside `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET` and
+  `HC_SCOPE`; inherited values and per-terminal environment overrides cannot
+  replace `HC_BIN`. Running programs keep their existing environment when
+  a new core adopts their holder; recovery shells get the recovering core's path.
 - `hc keep <t>` (or `run --keep`) replaces a lost program with a shell,
   never reruns a task. `hc keep <t> --off` disables recovery. Signal death
   without an exit code is loss too. After a grace delay, recovery runs on

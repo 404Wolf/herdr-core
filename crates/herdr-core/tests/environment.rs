@@ -4,6 +4,74 @@ mod common;
 
 use common::*;
 
+#[test]
+fn terminals_get_the_core_executable_even_with_a_stale_or_overridden_hc_bin() {
+    let mut s = Session::new();
+    s.env.push(("HC_BIN".into(), "/stale/inherited/hc".into()));
+    // A distinct path containing spaces, also different from the client's executable.
+    let core_bin = s.root.join("core executable");
+    std::fs::copy(BIN, &core_bin).unwrap();
+    let core_bin = core_bin.canonicalize().unwrap();
+    s.bin = core_bin.clone();
+    s.json(&["server", "start"]);
+    s.bin = BIN.into();
+    for env in [serde_json::json!({}), serde_json::json!({"HC_BIN": "/wrong/override/hc"})] {
+        let result = s.connect().call(
+            1,
+            "terminal.run",
+            serde_json::json!({
+                "argv": ["sh", "-c", "test -t 0 && printf 'core-bin=<%s> id=<%s> socket=<%s> scope=<%s>\\n' \"$HC_BIN\" \"$HC_TERMINAL_ID\" \"$HC_TERMINAL_SOCKET\" \"$HC_SCOPE\""],
+                "env": env
+            }),
+        );
+        let t = result["result"]["address"].as_str().unwrap();
+        wait_until("program exits", || get(&s, t)["state"] == "finished");
+        let output = text(&s, t);
+        assert!(
+            output.contains(&format!(
+                "core-bin=<{}> id=<{t}> socket=<{}> scope=<",
+                core_bin.display(),
+                s.socket().display()
+            )),
+            "{output}"
+        );
+        assert!(!output.contains("scope=<>"), "{output}");
+    }
+}
+
+#[test]
+fn kept_shells_get_hc_bin_from_the_core_that_recovers_them() {
+    let mut s = Session::new();
+    s.env.push(("HC_BIN".into(), "/stale/inherited/hc".into()));
+    s.env.push(("SHELL".into(), "/bin/sh".into()));
+    s.json(&["server", "start"]);
+    let result = s.connect().call(
+        1,
+        "terminal.run",
+        serde_json::json!({"argv": ["sleep", "100"], "keep": true, "env": {"HC_BIN": "/wrong/saved/hc"}}),
+    );
+    let t = result["result"]["address"].as_str().unwrap().to_owned();
+    for new_core in [false, true] {
+        let old = get(&s, &t)["pid"].as_i64().unwrap();
+        if new_core {
+            s.json(&["server", "stop"]);
+            let replacement = s.root.join("replacement core");
+            std::fs::copy(BIN, &replacement).unwrap();
+            s.bin = replacement;
+        } else {
+            let holder = s.json(&["server", "status"])["holder"]["pid"].as_i64().unwrap();
+            assert_eq!(unsafe { libc::kill(holder as i32, libc::SIGKILL) }, 0);
+        }
+        wait_until("replacement kept shell", || get(&s, &t)["pid"].as_i64().is_some_and(|p| p != old));
+        let output = s.root.join(format!("recovered-{new_core}"));
+        s.json(&["send", &t, &format!("test -t 0 && printf '%s' \"$HC_BIN\" > '{}'", output.display())]);
+        wait_until("recovered shell writes its executable path", || {
+            std::fs::read(&output).is_ok_and(|bytes| !bytes.is_empty())
+        });
+        assert_eq!(std::fs::read_to_string(output).unwrap(), s.bin.canonicalize().unwrap().to_str().unwrap());
+    }
+}
+
 fn raw_core(s: &Session) -> std::process::Child {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

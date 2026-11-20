@@ -79,7 +79,13 @@ impl Core {
             let Some(holder) = st.current() else { break };
             let instance = holder.instance.clone();
             let t = st.reg.terminals.get_mut(&id).expect("pending");
-            let env = crate::api::child_env(base_env.clone(), t.restart_env.clone());
+            let env = match crate::api::child_env(base_env.clone(), t.restart_env.clone()) {
+                Ok(env) => env,
+                Err(e) => {
+                    eprintln!("core: kept terminal {} waiting for environment: {}", t.address, e.message);
+                    continue;
+                }
+            };
             let cwd = t
                 .last_cwd
                 .as_ref()
