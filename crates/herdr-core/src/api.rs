@@ -23,6 +23,11 @@ pub const FEATURES: &[&str] = &[
     "automatic_input",
     "queue",
     "queue-keyed",
+    "viewer_visibility",
+    "viewer_focus",
+    "resize_history",
+    "attach_credit",
+    "focus_by_use",
 ];
 pub const FINISHED_LINES: usize = 1000;
 /// A terminal's identity: fixed at start from whoever starts it.
@@ -53,6 +58,8 @@ pub struct Call<'a> {
     pub conn: Option<&'a Arc<crate::wire::Conn>>,
     /// Where a plain connection receives its subscription.
     pub plain: Option<&'a std::sync::Mutex<Option<PlainSub>>>,
+    /// Whether the caller is still there (see `input::Gone`).
+    pub gone: crate::input::Gone,
 }
 
 impl std::ops::Deref for Call<'_> {
@@ -74,9 +81,9 @@ methods! { Ctx<'_>;
     "server.stop" => server_stop, Empty => StopResult,
         "Stop the core and its programs. Kept terminals remain pending and get new shells when the core next starts.",
         errors [];
-    "server.restart" => server_restart, Empty => StopResult,
-        "Planned restart (e.g. after an update): screens are saved, programs keep running, the next core adopts them.",
-        errors [];
+    "server.restart" => server_restart, RestartParams => StopResult,
+        "Planned restart (e.g. after an update): screens are saved, programs keep running, the next core adopts them. Once asked, terminal.run and machine.exec refuse until it has restarted. It first saves its registry and waits for that: if it can't (a full disk), it refuses with `unavailable` and nothing changes, because the next core kills every terminal its registry doesn't list. `force_stale_registry` restarts anyway; the answer's `warning` names the live terminals missing from the registry saved on disk, which the next core kills.",
+        errors ["unavailable"];
     "terminal.run" => terminal_run, RunParams => RunResult,
         "Start a program in a new terminal; or, when argv[0] names a template, start its command and send its body plus the rest of argv as the first message once the agent is ready. Returns once it runs (and the first message is sent or not).",
         errors ["invalid_params", "name_taken", "spawn_failed", "unavailable", "invalid_template", "not_found", "machine_unknown", "config"];
@@ -88,6 +95,9 @@ methods! { Ctx<'_>;
         errors [];
     "terminal.get" => terminal_get, TerminalParams => Public,
         "One terminal's facts, live or finished.",
+        errors ["not_found", "machine_unknown"];
+    "terminal.viewers" => terminal_viewers, ViewerListParams => crate::viewers::ViewerListResult,
+        "Read-only local snapshot of attached viewers and the active sizing selector; never queries peers.",
         errors ["not_found", "machine_unknown"];
     "terminal.kill" => terminal_kill, TerminalParams => Public,
         "End the program: hangup, then terminate, then kill. Returns the observed result.",
@@ -107,7 +117,7 @@ methods! { Ctx<'_>;
         "Open a raw stream to a live terminal on this framed connection (see `hello` with `framed`). Loss ends the stream even when kept; reattach after the restarted event.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "needs_framed"];
     "terminal.send" => terminal_send, SendParams => SendResult,
-        "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
+        "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min, counted from when it arrives, for them to send or clear it; a draft backspaced away is no draft, and one nobody typed on for 10 min, or whose viewer detached 1 min ago with none left, expires; terminal.get shows it as `draft`); keys a person presses meanwhile are held, then delivered. A send still waiting when its caller goes away (its `hc` was killed, its connection hung up) is dropped: nothing is typed. A client that only stops writing, as `hc connect` does when its stdin ends, still gets its answer. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "drafting", "invalid_params", "config"];
     "terminal.queue" => terminal_queue, QueueParams => SendResult,
         "Queue text in a terminal's inbox when its program follows it (terminal.inbox), as terminal.send would; otherwise fail with `not_following`. Never types, so a core that predates it refuses it as an unknown method. With a `key` already queued on that terminal within `queue_keys_kept_ms` (a retry after a lost answer), it isn't queued again and the answer says `repeated`; keys are kept with the terminal, across restarts. With `key_since` (when the key was first sent) before the terminal's keys go back, it may have been queued and forgotten: refused with `key_forgotten`, never queued again. With `core`, only that core queues it (`other_core` otherwise). This machine's terminals only.",
@@ -122,7 +132,7 @@ methods! { Ctx<'_>;
         "Wait until the program is not working (any word but working, or it exited/was lost); already not working returns at once. A program that never reported status is working until it exits. After a send from the same caller, waits for the turn that send started. A message to the caller also ends it: ended false, reason message, from = sender. A timeout is a check-in: ended false, current status.",
         errors ["not_found", "machine_unknown", "invalid_params", "needs_target", "config"];
     "terminal.keys" => terminal_keys, KeysParams => KeysResult,
-        "Press named keys, encoded for the program's current keyboard modes. Same quiet rule as send.",
+        "Press named keys, encoded for the program's current keyboard modes. Same quiet rule as send, and the same drop if its caller goes away while it waits.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "invalid_params"];
     "terminal.interrupt" => terminal_interrupt, InterruptParams => InterruptResult,
         "Press the stop key (esc if it reports status, else ctrl+c), then report what was observed. Never escalates.",
@@ -197,6 +207,7 @@ async fn hello(core: Ctx<'_>, p: HelloParams) -> Result<HelloResult, RpcError> {
     Ok(HelloResult {
         generation: GENERATION,
         version: version(),
+        build: crate::client::peer_build(),
         core: core.info.clone(),
         framed: p.framed,
         methods: METHOD_NAMES.iter().map(|m| m.to_string()).collect(),
@@ -234,6 +245,7 @@ async fn server_status(core: Ctx<'_>, _: Empty) -> Result<StatusResult, RpcError
         installed_by: crate::client::installed_by().map(String::from),
         features: FEATURES.iter().map(|f| f.to_string()).collect(),
         queue_keys_kept_ms: crate::inbox::KEYS_KEPT_MS,
+        saving: core.saving_failure().map(|(since_ms, reason)| SavingFailure { since_ms, reason }),
     })
 }
 
@@ -243,14 +255,69 @@ async fn server_stop(core: Ctx<'_>, _: Empty) -> Result<StopResult, RpcError> {
     }
     crate::restart::discard(&core.paths);
     if let Err(e) = core.shutdown().await {
-        eprintln!("core: shutdown registry flush failed: {}", e.message);
+        crate::log!("core: shutdown registry flush failed: {}", e.message);
     }
-    Ok(StopResult { stopped: true })
+    Ok(StopResult { stopped: true, warning: None })
 }
 
-async fn server_restart(core: Ctx<'_>, _: Empty) -> Result<StopResult, RpcError> {
+async fn server_restart(core: Ctx<'_>, p: RestartParams) -> Result<StopResult, RpcError> {
+    // From here nothing new starts (terminal.run and exec refuse), so the registry
+    // can't gain a terminal the next core would kill.
     crate::restart::prepare(core).map_err(|e| RpcError::internal(e.to_string()))?;
-    Ok(StopResult { stopped: true })
+    // The next core only knows the terminals saved. Save the registry as it is and
+    // wait for it before anything is acknowledged or any holder hears of the restart.
+    core.save(&core.lock());
+    let Some(why) = core.flush_warning().await else {
+        return Ok(StopResult { stopped: true, warning: None });
+    };
+    if !p.force_stale_registry {
+        crate::restart::cancel(core);
+        return Err(RpcError::new(
+            "unavailable",
+            format!("not restarting: {why}"),
+            "the next core would kill the live terminals missing from the saved registry; free the disk and try again, or --force-stale-registry",
+        ));
+    }
+    let warning = format!(
+        "restarting with a registry that is behind ({why}): {}",
+        match unsaved(core) {
+            Ok(lost) if lost.is_empty() =>
+                "every live terminal is in the saved registry, so the next core kills none".into(),
+            Ok(lost) =>
+                format!("the next core kills the live terminals missing from the saved registry: {}", lost.join(" ")),
+            Err(e) => format!(
+                "the saved registry can't be read to tell which ({e}); the next core kills every live terminal it doesn't list"
+            ),
+        }
+    );
+    crate::log!("core: {warning}");
+    Ok(StopResult { stopped: true, warning: Some(warning) })
+}
+
+/// The live terminals the next core would kill: not in the registry saved on disk as live on
+/// the holder that runs them (what `adopt` requires). Read from the file itself, not inferred
+/// from when saving began to fail: a terminal created before the first failed write was
+/// reported is just as missing. Err when the file can't be read.
+pub(crate) fn unsaved(core: &Core) -> Result<Vec<String>, String> {
+    let saved: crate::terminals::Registry =
+        crate::paths::read_state(&core.paths.state.join("terminals.json")).map_err(|e| e.to_string())?;
+    let st = core.lock();
+    let mut lost: Vec<String> = st
+        .reg
+        .terminals
+        .values()
+        .filter(|t| t.is_live())
+        .filter(|t| {
+            let on = t.holder.as_deref();
+            !saved
+                .terminals
+                .get(&t.id())
+                .is_some_and(|s| s.is_live() && s.holder.as_deref().or(saved.holder.as_deref()) == on)
+        })
+        .map(|t| t.address.clone())
+        .collect();
+    lost.sort();
+    Ok(lost)
 }
 
 async fn templates_list(core: Ctx<'_>, _: Empty) -> Result<TemplatesResult, RpcError> {
@@ -304,9 +371,18 @@ async fn terminal_list(core: Ctx<'_>, p: ListParams) -> Result<ListResult, RpcEr
 async fn terminal_get(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcError> {
     let id = resolve(core, &p.terminal)?;
     core.saw(p.caller.as_deref(), id);
-    let result = record(core, id).map(Public);
+    let result = record(core, id).map(|mut t| {
+        t.draft = crate::viewers::draft(&mut core.lock(), id);
+        Public(t)
+    });
     core.flush_saved().await?;
     result
+}
+
+async fn terminal_viewers(core: Ctx<'_>, p: ViewerListParams) -> Result<crate::viewers::ViewerListResult, RpcError> {
+    let id = resolve(core, &p.terminal)?;
+    record(core, id)?;
+    Ok(core.viewer_list(id, crate::terminals::address(id)))
 }
 
 async fn terminal_kill(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcError> {
@@ -454,18 +530,52 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
         observe: p.observe,
         resize_notifications: p.resize_notifications,
         history: p.history,
+        resize_history: p.resize_history,
         size: (p.cols, p.rows),
         display: p.display,
         resumed: p.resumed,
+        visible: !p.visibility_updates || p.visible,
+        visibility_updates: p.visibility_updates,
+        focus_updates: p.focus_updates,
+        focused: p.focus_updates && p.focused,
+        idle_ms: p.idle_ms,
         desktop_group: core.desktop_group(conn, p.desktop_group.as_deref()),
     };
     let channel = core.attach(conn, id, req)?;
+    if let Some(credit) = p.credit {
+        // Still paused: nothing has gone out on it yet.
+        conn.with(|out| out.set_credit(channel, credit as usize));
+    }
+    attach_gate(p.resumed, p.credit).await;
     Ok(AttachResult {
         channel,
         terminal: Public(record(core, id)?),
-        resize_notifications: p.observe && p.resize_notifications,
+        resize_notifications: p.resize_notifications,
+        visibility_updates: p.visibility_updates,
+        focus_updates: p.focus_updates,
+        resize_history: if p.resize_notifications {
+            p.resize_history.min(crate::viewers::MAX_RESIZE_HISTORY)
+        } else {
+            0
+        },
         automatic_input: true,
+        focus_by_use: p.focus_updates,
     })
+}
+
+/// Tests only (debug builds): with `HC_TEST_ATTACH_GATE` set to a folder,
+/// a resumed attach writes `ready` there (`{"credit": ..}`) once it is set up, and
+/// waits for `release` before its reply goes out: a scheduling barrier for
+/// what a relay does while a reattach is in flight.
+async fn attach_gate(resumed: bool, credit: Option<u32>) {
+    if !cfg!(debug_assertions) || !resumed {
+        return;
+    }
+    let Some(gate) = std::env::var_os("HC_TEST_ATTACH_GATE").map(std::path::PathBuf::from) else { return };
+    let _ = std::fs::write(gate.join("ready"), json!({ "credit": credit }).to_string());
+    while !gate.join("release").exists() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn terminal_queue(core: Ctx<'_>, p: QueueParams) -> Result<SendResult, RpcError> {
@@ -504,7 +614,10 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
     let only_if = p.only_if.map(|w| word(&w));
     let since = p.key_since.unwrap_or_else(crate::runtime::now_ms);
     let key = p.key.as_deref().map(|key| crate::inbox::QueueKey { key, since });
-    let sent = core.send_or_queue(id, from, &text, p.force, only_if.as_deref(), p.inbox_only, key).await?;
+    let sent = core
+        .send_or_queue(id, from, &text, p.force, only_if.as_deref(), p.inbox_only, key, &core.gone)
+        .await
+        .inspect_err(logged_if_dropped("terminal.send", &p.terminal, p.caller.as_deref()))?;
     if let Some(child) = p.caller.as_deref().and_then(crate::terminals::parse_id) {
         let mut st = core.lock();
         if let Some(c) = st
@@ -541,7 +654,7 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
     } else {
         None
     };
-    core.flush_saved().await?;
+    let warning = core.flush_warning().await;
     Ok(SendResult {
         status: sent.status,
         turn: sent.turn,
@@ -550,6 +663,7 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
         via: sent.via.into(),
         waiting: sent.waiting,
         repeated: sent.repeated,
+        warning,
     })
 }
 
@@ -602,27 +716,40 @@ async fn terminal_put(core: Ctx<'_>, p: PutParams) -> Result<PutResult, RpcError
     Ok(PutResult { path: path.display().to_string(), bytes: bytes.len() })
 }
 
+/// A call whose caller went away while it waited types nothing, and nobody
+/// is left to hear it: the core's log says so.
+fn logged_if_dropped<'a>(method: &'a str, terminal: &'a str, caller: Option<&'a str>) -> impl Fn(&RpcError) + 'a {
+    move |e| {
+        if e.kind == "cancelled" {
+            let from = caller.filter(|c| !c.is_empty()).map(|c| format!(" from {c}")).unwrap_or_default();
+            crate::log!("core: {method} to {terminal}{from}: {}", e.message);
+        }
+    }
+}
+
 async fn terminal_keys(core: Ctx<'_>, p: KeysParams) -> Result<KeysResult, RpcError> {
     let id = resolve(core, &p.terminal)?;
-    let (status, turn) = core.keys(id, &p.keys).await?;
+    let dropped = logged_if_dropped("terminal.keys", &p.terminal, p.caller.as_deref());
+    let (status, turn) = core.keys(id, &p.keys, &core.gone).await.inspect_err(dropped)?;
     core.saw(p.caller.as_deref(), id);
-    core.flush_saved().await?;
-    Ok(KeysResult { status, turn })
+    let warning = core.flush_warning().await;
+    Ok(KeysResult { status, turn, warning })
 }
 
 async fn terminal_interrupt(core: Ctx<'_>, p: InterruptParams) -> Result<InterruptResult, RpcError> {
     use crate::input::Interrupted;
     let timeout = seconds(p.timeout)?.unwrap_or(Duration::from_secs(10));
     let id = resolve(core, &p.terminal)?;
-    let (outcome, key) = core.interrupt(id, timeout).await?;
+    let dropped = logged_if_dropped("terminal.interrupt", &p.terminal, None);
+    let (outcome, key) = core.interrupt(id, timeout, &core.gone).await.inspect_err(dropped)?;
     let outcome = match outcome {
         Interrupted::Stopped => "stopped",
         Interrupted::Exited => "exited",
         Interrupted::StillWorking => "still_working",
         Interrupted::Unknown => "unknown",
     };
-    core.flush_saved().await?;
-    Ok(InterruptResult { outcome: outcome.into(), key })
+    let warning = core.flush_warning().await;
+    Ok(InterruptResult { outcome: outcome.into(), key, warning })
 }
 
 async fn events_subscribe(core: Ctx<'_>, p: SubscribeParams) -> Result<SubscribeResult, RpcError> {

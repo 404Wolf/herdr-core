@@ -19,13 +19,21 @@ use tokio::sync::{mpsc, oneshot};
 
 /// A viewer here that a stream there goes to: its connection and channel.
 type Sink = (Arc<Conn>, u32);
-/// A pending reply, its stream sink and whether resize support is required.
-type Waiting = (oneshot::Sender<Value>, Option<(Sink, bool)>);
+/// A pending reply, its stream sink and whether resize, visibility and focus
+/// support are required.
+/// The sink an attach reply opens, and what the reply must confirm before
+/// it does: resize notifications, visibility, focus, and a `resize_history`.
+type Required = (Sink, bool, bool, bool, u64);
+type Waiting = (oneshot::Sender<Value>, Option<Required>);
 
 mod viewers;
 #[cfg(test)]
 use viewers::automatic_input;
-use viewers::{RESIZE_LOST, negotiate_resize, reattach};
+#[cfg(test)]
+use viewers::visibility_updates;
+#[cfg(test)]
+use viewers::focus_updates;
+use viewers::{FOCUS_LOST, HISTORY_LOST, RESIZE_LOST, VISIBILITY_LOST, negotiate_resize, reattach};
 pub use viewers::{Relayed, attach, conn_gone, relay_in};
 
 #[cfg(test)]
@@ -48,6 +56,7 @@ pub struct Line {
     mirror: Mutex<(u64, Option<u32>, Vec<u8>)>,
     /// What the core there said it can do (its `hello`).
     features: Vec<String>,
+    build: Option<String>,
 }
 
 impl Line {
@@ -55,6 +64,7 @@ impl Line {
         let features = hello["features"].as_array().into_iter().flatten();
         Arc::new(Line {
             features: features.filter_map(|f| f.as_str().map(String::from)).collect(),
+            build: hello["build"].as_str().filter(|s| !s.is_empty()).map(str::to_owned),
             frames,
             pending: Mutex::default(),
             streams: Mutex::default(),
@@ -66,12 +76,34 @@ impl Line {
     /// A reply to one of our calls: to whoever waits for it.
     fn take_reply(&self, mut reply: Value) {
         let Some((waiter, sink)) = reply["id"].as_u64().and_then(|id| lock(&self.pending).remove(&id)) else { return };
-        if let (Some((sink, require_resize)), Some(there)) = (sink, reply["result"]["channel"].as_u64()) {
+        if let (Some((sink, require_resize, require_visibility, require_focus, require_history)), Some(there)) =
+            (sink, reply["result"]["channel"].as_u64())
+        {
             if require_resize && reply["result"]["resize_notifications"] != true {
                 let _ = self.frames.send(wire::encode(there as u32, wire::CLOSE, b""));
                 reply = crate::rpc::response(
                     reply["id"].clone(),
                     Err(RpcError::new("unavailable", RESIZE_LOST, "attach again")),
+                );
+            } else if require_visibility && reply["result"]["visibility_updates"] != true {
+                let _ = self.frames.send(wire::encode(there as u32, wire::CLOSE, b""));
+                reply = crate::rpc::response(
+                    reply["id"].clone(),
+                    Err(RpcError::new("unavailable", VISIBILITY_LOST, "attach again")),
+                );
+            } else if require_focus && reply["result"]["focus_updates"] != true {
+                let _ = self.frames.send(wire::encode(there as u32, wire::CLOSE, b""));
+                reply = crate::rpc::response(
+                    reply["id"].clone(),
+                    Err(RpcError::new("unavailable", FOCUS_LOST, "attach again")),
+                );
+            } else if require_history > 0
+                && viewers::resize_history(self, require_history, &reply["result"]) != require_history
+            {
+                let _ = self.frames.send(wire::encode(there as u32, wire::CLOSE, b""));
+                reply = crate::rpc::response(
+                    reply["id"].clone(),
+                    Err(RpcError::new("unavailable", HISTORY_LOST, "attach again")),
                 );
             } else {
                 lock(&self.streams).insert(there as u32, sink);
@@ -102,7 +134,7 @@ impl Line {
         machine: &str,
         method: &str,
         params: Value,
-        sink: Option<(Sink, bool)>,
+        sink: Option<Required>,
         deadline: Duration,
     ) -> Result<Value, RpcError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -178,6 +210,9 @@ pub struct MachineView {
     pub machine: Machine,
     /// connecting, connected, needs_login or unreachable.
     pub state: String,
+    /// Identity from the live hello, absent for old or disconnected peers.
+    pub build: Option<String>,
+    pub build_skew: bool,
     /// Since when it is not connected (ms since the epoch).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since_ms: Option<u64>,
@@ -193,7 +228,13 @@ pub fn view(st: &State, m: &Machine) -> MachineView {
         Some(LineState::NeedsUpdate { since_ms }) => ("needs_update", Some(*since_ms), None),
         Some(LineState::Unreachable { since_ms, why }) => ("unreachable", Some(*since_ms), Some(why.clone())),
     };
-    MachineView { machine: m.clone(), state: state.into(), since_ms, why }
+    let build = match st.lines.get(&m.id) {
+        Some(LineState::Connected(line)) => line.build.clone(),
+        _ => None,
+    };
+    let build_skew = matches!(st.lines.get(&m.id), Some(LineState::Connected(_)))
+        && build.as_ref().is_none_or(|b| b != &crate::client::peer_build());
+    MachineView { machine: m.clone(), state: state.into(), since_ms, why, build, build_skew }
 }
 
 fn reconnect_max() -> Duration {
@@ -257,7 +298,7 @@ async fn supervise(core: Arc<Core>, id: String) {
             st.lines.insert(id.clone(), state);
             core.changed.notify_waiters();
         };
-        let hello = json!({"framed": true, "core": core.info, "calls_you": m.name, "features": crate::api::FEATURES});
+        let hello = json!({"framed": true, "core": core.info, "calls_you": m.name, "build": crate::client::peer_build(), "features": crate::api::FEATURES});
         match crate::machines::dial(&core.paths, m.reach(), m.session.as_deref(), hello).await {
             Ok(d) if d.hello["core"]["id"] != m.id.as_str() => {
                 down(&mut core.lock(), format!("a different core answers there ({})", d.hello["core"]["id"]));
@@ -329,7 +370,7 @@ async fn hold(core: &Arc<Core>, m: &Machine, mut d: crate::machines::Dialed) {
                 _ => break,
             },
             () = heard.silent_for(silence) => {
-                eprintln!("core: {} sent nothing for {} s: line given up", m.name, silence.as_secs());
+                crate::log!("core: {} sent nothing for {} s: line given up", m.name, silence.as_secs());
                 break;
             }
         };
@@ -355,13 +396,7 @@ async fn hold(core: &Arc<Core>, m: &Machine, mut d: crate::machines::Dialed) {
                 mirror_events(core, m, &line, &payload);
                 let _ = line.frames.send(wire::encode(there, wire::CREDIT, &(payload.len() as u32).to_le_bytes()));
             }
-            (there, wire::DATA) => {
-                if let Some((conn, here)) = lock(&line.streams).get(&there) {
-                    conn.with(|out| {
-                        out.data(*here, &payload);
-                    });
-                }
-            }
+            (there, wire::DATA) => stream_data(core, &line, there, &payload),
             (there, wire::RESIZE) if payload.len() == 4 => {
                 if let Some((conn, here)) = lock(&line.streams).get(&there) {
                     conn.with(|out| out.ordered_resize(*here, &payload));
@@ -391,14 +426,42 @@ async fn hold(core: &Arc<Core>, m: &Machine, mut d: crate::machines::Dialed) {
     // Viewers here hear that the line is gone and stay open; the programs keep
     // running there, and the viewers get them back with the line.
     let notice = format!("\r\n[line to {} lost; reconnecting...]\r\n", m.name);
-    for (_, (conn, here)) in lock(&line.streams).drain() {
-        conn.with(|out| {
-            out.data(here, notice.as_bytes());
-        });
+    let streams: Vec<(u32, Sink)> = lock(&line.streams).drain().collect();
+    for (there, (conn, here)) in streams {
+        let mut taken = true;
+        conn.with(|out| taken = out.data(here, notice.as_bytes()));
+        if !taken {
+            overflowed(core, &line, &conn, here, there);
+        }
     }
     // Killed, not waited for: a Mac core once never heard the old ssh had
     // died and stayed "connecting" for good. It is reaped in the background.
     let _ = d.child.start_kill();
+}
+
+/// Stream bytes from there for a viewer here.
+fn stream_data(core: &Core, line: &Line, there: u32, payload: &[u8]) {
+    let target = lock(&line.streams).get(&there).cloned();
+    if let Some((conn, here)) = target {
+        let mut taken = true;
+        conn.with(|out| taken = out.data(here, payload));
+        if !taken {
+            // Too far behind here (an older core there ignored our credit):
+            // its backlog is gone, so the stream ends now, never going on as
+            // if those bytes had arrived.
+            lock(&line.streams).remove(&there);
+            overflowed(core, line, &conn, here, there);
+        }
+    }
+}
+
+/// A relayed stream's backlog here overflowed and was dropped: the viewer
+/// is told (CLOSE, `relay_overflow`) and attaches again; the stream there ends.
+fn overflowed(core: &Core, line: &Line, conn: &Arc<Conn>, here: u32, there: u32) {
+    crate::log!("core: a relayed stream fell too far behind: closed");
+    core.lock().relayed.remove(&(conn_key(conn), here));
+    let _ = line.frames.send(wire::encode(there, wire::CLOSE, b""));
+    conn.with(|out| out.close(here, br#"{"reason":"relay_overflow"}"#));
 }
 
 /// A machine's terminals now (after a connect, or after it says we missed
@@ -552,7 +615,8 @@ async fn from_machine(core: Arc<Core>, m: Machine, line: Arc<Line>, message: Val
             if let Some(caller) = params["caller"].as_str() {
                 params["caller"] = format!("{}/{caller}", m.name).into();
             }
-            let call = crate::api::Call { core: &core, conn: None, plain: None };
+            // A peer's call has no connection of its own to lose here: it is the peer's to cancel.
+            let call = crate::api::Call { core: &core, conn: None, plain: None, gone: Default::default() };
             crate::api::dispatch(&call, method, params).await
         }
     };
@@ -576,7 +640,7 @@ pub struct Peer {
 fn save_peers(core: &Core, st: &State) {
     let bytes = serde_json::to_vec(&st.peers).expect("peers serialize");
     if let Err(e) = crate::paths::write_atomic(&core.paths.state.join("peers.json"), &bytes) {
-        eprintln!("core: cannot save peers: {e}");
+        crate::log!("core: cannot save peers: {e}");
     }
 }
 

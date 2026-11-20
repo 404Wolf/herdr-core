@@ -73,8 +73,10 @@ pub(super) fn machine(
                     let session = m["session"].as_str().map(|x| format!(" session {x}")).unwrap_or_default();
                     let state = line_state(m);
                     format!(
-                        "{:<16} {state}  \x1b[2m{}{session} \u{b7} hc {}\x1b[22m",
+                        "{:<16} {state}  build {}{}  \x1b[2m{}{session} \u{b7} hc {}\x1b[22m",
                         s(&m["name"]),
+                        m["build"].as_str().unwrap_or("unknown"),
+                        if m["build_skew"] == true { " ≠" } else { "" },
                         s(&m["target"]),
                         s(&m["version"])
                     )

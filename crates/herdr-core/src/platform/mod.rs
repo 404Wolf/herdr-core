@@ -27,6 +27,19 @@ pub(crate) fn local_desktop_viewer(read: &AsyncRead) -> bool {
     }
 }
 
+/// Kernel-authenticated same-uid Unix peer PID, when this platform exposes it.
+pub(crate) fn local_peer_pid(read: &AsyncRead) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        desktop_peer::same_uid_peer_pid(read)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = read;
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_bundle;
 #[cfg(target_os = "macos")]
@@ -60,7 +73,7 @@ pub fn prepare_core() {
 pub(crate) fn raise_nofile_limit() {
     #[cfg(unix)]
     if let Err(error) = unix::raise_nofile_limit() {
-        eprintln!("cannot raise open file limit; using inherited limit: {error}");
+        crate::log!("cannot raise open file limit; using inherited limit: {error}");
     }
 }
 
@@ -249,7 +262,7 @@ pub async fn program_env() -> std::collections::BTreeMap<String, String> {
     {
         env = tokio::task::spawn_blocking(move || {
             if let Err(error) = windows_env::refresh(&mut env) {
-                eprintln!("cannot refresh Windows environment; using inherited settings: {error}");
+                crate::log!("cannot refresh Windows environment; using inherited settings: {error}");
             }
             env
         })

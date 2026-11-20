@@ -31,10 +31,16 @@ pub(crate) fn prepare(core: &Core) -> io::Result<()> {
     drop(state);
     discard(&core.paths);
     if let Err(error) = save(&core.paths) {
-        eprintln!("core: cannot preserve restart environment; using the next launcher's environment: {error}");
+        crate::log!("core: cannot preserve restart environment; using the next launcher's environment: {error}");
         discard(&core.paths);
     }
     Ok(())
+}
+
+/// Takes the restart back: it was refused before any holder heard of it.
+pub(crate) fn cancel(core: &Core) {
+    core.restart.store(false, Ordering::SeqCst);
+    discard(&core.paths);
 }
 
 fn save(paths: &Paths) -> io::Result<()> {
@@ -92,7 +98,7 @@ pub(crate) unsafe fn restore(paths: &Paths) {
         Ok(Some(vars)) => vars,
         Ok(None) => return,
         Err(error) => {
-            eprintln!("core: ignoring restart environment: {error}");
+            crate::log!("core: ignoring restart environment: {error}");
             discard(paths);
             return;
         }
@@ -122,7 +128,7 @@ fn remove(path: &Path) {
     if let Err(error) = std::fs::remove_file(path)
         && error.kind() != io::ErrorKind::NotFound
     {
-        eprintln!("core: cannot remove {}: {error}", path.display());
+        crate::log!("core: cannot remove {}: {error}", path.display());
     }
 }
 
@@ -150,7 +156,7 @@ pub(crate) fn discard_if_stopped(paths: &Paths) {
         Ok(lock) if crate::platform::try_lock(&lock) => discard(paths),
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => eprintln!("core: cannot lock restart environment for cleanup: {error}"),
+        Err(error) => crate::log!("core: cannot lock restart environment for cleanup: {error}"),
     }
 }
 

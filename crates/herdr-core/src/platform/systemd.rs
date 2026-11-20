@@ -69,7 +69,7 @@ pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
         Ok(run) => run,
         Err(warn) => {
             if warn {
-                eprintln!("{NO_MANAGER}");
+                crate::log!("{NO_MANAGER}");
             }
             return None;
         }
@@ -77,7 +77,7 @@ pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
     let guarded = match ensure_shutdown_guard(&run, log) {
         Ok(()) => true,
         Err(e) => {
-            eprintln!("hc: {e}; starting without shutdown ordering");
+            crate::log!("hc: {e}; starting without shutdown ordering");
             false
         }
     };
@@ -125,7 +125,7 @@ pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
         Ok(out) => Err(io::Error::other(format!("systemd-run: {}", String::from_utf8_lossy(&out.stderr).trim()))),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let _ = std::fs::remove_dir_all(&dir);
-            eprintln!("{NO_MANAGER} (no systemd-run on PATH)");
+            crate::log!("{NO_MANAGER} (no systemd-run on PATH)");
             return None;
         }
         Err(e) => Err(io::Error::new(e.kind(), format!("systemd-run: {e}"))),
@@ -331,9 +331,9 @@ fn enable_linger(mut command: Command, user: String) -> io::Result<std::thread::
             .status()
             .is_ok_and(|s| s.success());
         if enabled {
-            eprintln!("hc: turned on linger for {user}, so the core outlives your logins");
+            crate::log!("hc: turned on linger for {user}, so the core outlives your logins");
         } else {
-            eprintln!("hc: the core stops when your last login ends; `sudo loginctl enable-linger {user}` keeps it");
+            crate::log!("hc: the core stops when your last login ends; `sudo loginctl enable-linger {user}` keeps it");
         }
     })
 }

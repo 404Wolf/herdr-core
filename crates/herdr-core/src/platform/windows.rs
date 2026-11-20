@@ -298,6 +298,13 @@ impl Listener {
 pub type AsyncRead = tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeServer>;
 pub type AsyncWrite = tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>;
 
+/// A pipe can't be looked at without reading it, and a call that reads what its client sent
+/// next would lose it: on Windows a caller that went away is not noticed, and its send
+/// waits for its turn as before.
+pub(crate) async fn peer_gone(_: &AsyncRead) {
+    std::future::pending().await
+}
+
 /// The core's pipe for clients.
 pub struct AsyncListener {
     name: PathBuf,

@@ -24,7 +24,7 @@ pub fn holder_startup() {
         exec(cmd)
     })();
     if let Err(error) = result {
-        eprintln!("hc: cannot disclaim holder responsibility: {error}");
+        crate::log!("hc: cannot disclaim holder responsibility: {error}");
         std::process::exit(1);
     }
 }
@@ -41,9 +41,9 @@ fn exec_or_inherit(mut cmd: Command, disclaim: Option<Disclaim>) -> io::Result<(
     match disclaim {
         Some(disclaim) => {
             let error = exec_with(&cmd, disclaim).unwrap_err();
-            eprintln!("hc: responsibility disclaimer failed ({error}); using inherited responsibility");
+            crate::log!("hc: responsibility disclaimer failed ({error}); using inherited responsibility");
         }
-        None => eprintln!("hc: responsibility disclaimer unavailable; using inherited responsibility"),
+        None => crate::log!("hc: responsibility disclaimer unavailable; using inherited responsibility"),
     }
     Err(cmd.exec())
 }

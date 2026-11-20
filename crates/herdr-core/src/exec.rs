@@ -141,7 +141,7 @@ pub async fn run(core: &Arc<Core>, p: ExecParams, from_afar: bool) -> Result<Exe
         ),
         None => None,
     };
-    crate::api::not_stopping(&core.lock())?;
+    crate::api::not_stopping(core, &core.lock())?;
     let slot = Slot::take()?;
     let cwd = folder(p.cwd.as_deref(), from_afar);
     let token = crate::sweep::token();

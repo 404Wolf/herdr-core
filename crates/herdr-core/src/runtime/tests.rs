@@ -27,7 +27,13 @@ async fn keys_pressed_during_a_paste_follow_its_submit() {
             AttachRequest {
                 observe: false,
                 resize_notifications: false,
+                visible: true,
+                visibility_updates: false,
+                focus_updates: false,
+                focused: false,
+                idle_ms: None,
                 history: 0,
+                resize_history: 0,
                 size: (80, 24),
                 display: Display::default(),
                 resumed: false,
@@ -38,7 +44,8 @@ async fn keys_pressed_during_a_paste_follow_its_submit() {
     // Ignore attach's resize frames. From here the fake holder sees only input.
     while frames.try_recv().is_ok() {}
     {
-        let sending = core.send(id, "abc", false, None);
+        let gone = crate::input::Gone::default();
+        let sending = core.send(id, "abc", false, None, &gone);
         tokio::pin!(sending);
         poll_fn(|cx| {
             assert!(sending.as_mut().poll(cx).is_pending(), "the paste must pause before submit");
@@ -96,7 +103,7 @@ async fn server_stop_succeeds_even_when_the_registry_flush_times_out() {
         Ok(())
     })
     .unwrap();
-    let call = crate::api::Call { core: &core, conn: None, plain: None };
+    let call = crate::api::Call { core: &core, conn: None, plain: None, gone: Default::default() };
     let started = Instant::now();
     let stop = crate::api::dispatch(&call, "server.stop", json!({})).await;
     release.send(()).unwrap();
@@ -105,6 +112,109 @@ async fn server_stop_succeeds_even_when_the_registry_flush_times_out() {
     remove_root(&root);
     assert!(started.elapsed() >= Duration::from_secs(10), "stuck disks must still time out");
     assert_eq!(stop.unwrap()["stopped"], true);
+}
+
+#[tokio::test]
+async fn a_restart_saves_first_starts_nothing_meanwhile_and_is_taken_back_when_it_cannot() {
+    let (mut core, root) = test_core();
+    core.flush_saved().await.unwrap();
+    let (release, blocked) = mpsc::channel();
+    let mut first = true;
+    Arc::get_mut(&mut core).unwrap().registry_writer = RegistryWriter::start(move |_| {
+        if first {
+            first = false;
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        Err(io::Error::other("disk full"))
+    })
+    .unwrap();
+    let call = crate::api::Call { core: &core, conn: None, plain: None, gone: Default::default() };
+    let err = {
+        let restarting = crate::api::dispatch(&call, "server.restart", json!({}));
+        tokio::pin!(restarting);
+        // It waits for its save, and nothing can start meanwhile: a terminal created now
+        // would be missing from what the next core loads, and it kills what that doesn't list.
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut restarting).await.is_err());
+        let refused = crate::api::not_stopping(&core, &core.lock()).unwrap_err();
+        assert!(refused.message.contains("restarting"), "{}", refused.message);
+        release.send(()).unwrap();
+        // The save failed: refused before anything was acknowledged, and taken back.
+        restarting.await.unwrap_err()
+    };
+    assert_eq!(err.kind, "unavailable");
+    assert!(err.message.contains("not restarting") && err.message.contains("disk full"), "{}", err.message);
+    assert!(!core.restart.load(std::sync::atomic::Ordering::SeqCst), "the restart was taken back");
+    assert!(!root.join("state/restart-env.json").exists(), "no environment left behind");
+    crate::api::not_stopping(&core, &core.lock()).unwrap();
+
+    // Forced: it goes ahead and names what the next core will kill.
+    let lost = {
+        let mut st = core.lock();
+        let id = st
+            .reg
+            .create(crate::terminals::NewTerminal { argv: vec!["sh".into()], ..Default::default() }, now_ms())
+            .unwrap();
+        crate::terminals::address(id)
+    };
+    let forced = crate::api::dispatch(&call, "server.restart", json!({"force_stale_registry": true})).await.unwrap();
+    let warning = forced["warning"].as_str().expect("it says what it kills");
+    assert!(warning.contains(&lost) && warning.contains("disk full"), "{warning}");
+    assert!(core.restart.load(std::sync::atomic::Ordering::SeqCst));
+    drop(core);
+    remove_root(&root);
+}
+
+/// A restart forced over a failing save names what the next core kills: the live terminals
+/// missing from the registry on disk, whenever saving began to fail. (The terminal that
+/// triggers the first failed write is created before that failure is reported.)
+#[tokio::test]
+async fn a_forced_restart_names_every_live_terminal_missing_from_the_saved_registry() {
+    let (mut core, root) = test_core();
+    core.flush_saved().await.unwrap(); // the empty registry is on disk
+    let (began, started) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let mut first = true;
+    Arc::get_mut(&mut core).unwrap().registry_writer = RegistryWriter::start(move |_| {
+        if first {
+            first = false;
+            began.send(()).unwrap();
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        Err(io::Error::other("disk full"))
+    })
+    .unwrap();
+    let new_terminal = |core: &Core| {
+        let mut st = core.lock();
+        let id = st
+            .reg
+            .create(crate::terminals::NewTerminal { argv: vec!["sh".into()], ..Default::default() }, now_ms())
+            .unwrap();
+        core.save(&st);
+        crate::terminals::address(id)
+    };
+    let first_lost = new_terminal(&core);
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The first failure is reported well after the terminal was created.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    release.send(()).unwrap();
+    assert!(core.flush_warning().await.is_some());
+    assert!(core.saving_failure().unwrap().0 > 0);
+    let call = crate::api::Call { core: &core, conn: None, plain: None, gone: Default::default() };
+    let answer = crate::api::dispatch(&call, "server.restart", json!({"force_stale_registry": true})).await.unwrap();
+    let warning = answer["warning"].as_str().unwrap();
+    assert!(warning.contains(&first_lost) && warning.contains("disk full"), "{warning}");
+
+    // What is on disk is not lost, whenever it was written; the file is what counts.
+    let saved = serde_json::to_vec(&core.lock().reg).unwrap();
+    write_atomic(&core.paths.state.join("terminals.json"), &saved).unwrap();
+    assert_eq!(crate::api::unsaved(&core).unwrap(), Vec::<String>::new());
+    let second_lost = new_terminal(&core);
+    assert_eq!(crate::api::unsaved(&core).unwrap(), [second_lost]);
+    // A registry that can't be read says so, instead of promising anything.
+    std::fs::write(core.paths.state.join("terminals.json"), b"{ not json").unwrap();
+    assert!(crate::api::unsaved(&core).is_err());
+    drop(core);
+    remove_root(&root);
 }
 
 fn test_core() -> (Arc<Core>, PathBuf) {
@@ -142,7 +252,7 @@ async fn label_and_kill_reply_with_the_record_observed_before_flushing() {
             id
         };
         let reply = {
-            let call = crate::api::Call { core: &core, conn: None, plain: None };
+            let call = crate::api::Call { core: &core, conn: None, plain: None, gone: Default::default() };
             let request =
                 crate::api::dispatch(&call, method, json!({"terminal": crate::terminals::address(id), "labels": {}}));
             tokio::pin!(request);
@@ -210,7 +320,7 @@ async fn a_prepared_restart_survives_sigterm_and_rejects_stop() {
     };
     paths.create_dirs().unwrap();
     let core = Core::start(paths, CoreInfo { id: "test".into(), name: "test".into() }).unwrap();
-    let call = crate::api::Call { core: &core, conn: None, plain: None };
+    let call = crate::api::Call { core: &core, conn: None, plain: None, gone: Default::default() };
     crate::api::dispatch(&call, "server.restart", serde_json::json!({})).await.unwrap();
     crate::restart::on_sigterm(&core);
     assert!(core.paths.state.join("restart-env.json").exists(), "SIGTERM keeps the explicit restart's note");

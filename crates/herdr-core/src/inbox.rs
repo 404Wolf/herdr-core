@@ -123,6 +123,7 @@ impl Core {
         only_if: Option<&str>,
         inbox_only: bool,
         key: Option<QueueKey<'_>>,
+        gone: &crate::input::Gone,
     ) -> Result<crate::input::Sent, RpcError> {
         let queued = {
             let mut st = self.lock();
@@ -161,7 +162,7 @@ impl Core {
                     "nothing was typed; its program doesn't read its inbox (`hc inbox --follow`)",
                 ));
             }
-            return self.send(id, text, force, only_if).await;
+            return self.send(id, text, force, only_if, gone).await;
         };
         let started = if repeated { None } else { self.started_after(id, turn, reported).await };
         Ok(crate::input::Sent { status, turn, started, via: "inbox", waiting: Some(waiting), repeated })

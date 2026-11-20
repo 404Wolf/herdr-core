@@ -165,9 +165,9 @@ impl Core {
         let reg: Registry = read_state(&paths.state.join("terminals.json"))?;
         let docs_path = paths.state.join("docs.json");
         let docs = read_state(&docs_path).unwrap_or_else(|e| {
-            eprintln!("core: cannot load documents, starting empty: {e}");
+            crate::log!("core: cannot load documents, starting empty: {e}");
             if let Err(e) = std::fs::rename(&docs_path, paths.state.join("docs.json.bad")) {
-                eprintln!("core: cannot quarantine documents: {e}");
+                crate::log!("core: cannot quarantine documents: {e}");
             }
             Default::default()
         });
@@ -225,18 +225,35 @@ impl Core {
 
     /// Acknowledged mutations wait here without holding the state lock or blocking the executor.
     /// Attach, events.subscribe snapshots, forwarded run `afar`, and NotesAfar replies do not wait.
-    /// Completed write failures are logged, as before; a stuck disk still times out.
+    /// A write that failed is not the caller's failure: the writer logs it once and keeps
+    /// trying, and the mutation stands; a stuck disk still times out.
     pub async fn flush_saved(&self) -> Result<(), crate::rpc::RpcError> {
-        tokio::time::timeout(Duration::from_secs(10), self.registry_writer.flush())
-            .await
-            .map_err(|_| {
-                crate::rpc::RpcError::new(
-                    "unavailable",
-                    "registry persistence timed out; the operation may already have completed",
-                    "check the terminal and disk before retrying",
-                )
-            })?
-            .map_err(|e| crate::rpc::RpcError::internal(format!("cannot save terminals: {e}")))
+        self.saved().await.map(drop)
+    }
+
+    /// While saving the registry fails: since when (ms since the epoch) and why.
+    pub fn saving_failure(&self) -> Option<(u64, String)> {
+        self.registry_writer.failing()
+    }
+
+    /// For a call whose effect cannot be undone (text typed, keys pressed): a registry that
+    /// can't be saved, or not in time, is a warning in its answer, never an error. A caller
+    /// told its send failed sends it again.
+    pub async fn flush_warning(&self) -> Option<String> {
+        self.saved().await.unwrap_or_else(|e| Some(e.message))
+    }
+
+    /// Waits for the registry to be saved: `Some(why)` when it couldn't be (the writer keeps trying).
+    async fn saved(&self) -> Result<Option<String>, crate::rpc::RpcError> {
+        match tokio::time::timeout(Duration::from_secs(10), self.registry_writer.flush()).await {
+            Err(_) => Err(crate::rpc::RpcError::new(
+                "unavailable",
+                "registry persistence timed out; the operation may already have completed",
+                "check the terminal and disk before retrying",
+            )),
+            Ok(Ok(())) => Ok(None),
+            Ok(Err(e)) => Ok(Some(format!("the core could not save its terminals ({e}); it keeps trying"))),
+        }
     }
 
     /// For frequent changes a crash may lose (the next start rebuilds them):
@@ -601,10 +618,10 @@ impl Core {
                 Ok(Ok(_))
             );
         if taken {
-            eprintln!("core: lost the link to holder {instance}, reconnected");
+            crate::log!("core: lost the link to holder {instance}, reconnected");
             return;
         }
-        eprintln!("core: lost the link to holder {instance} for good; its terminals wait for the next core start");
+        crate::log!("core: lost the link to holder {instance} for good; its terminals wait for the next core start");
         // Closed, so the holder sees us leave instead of waiting on a link nobody reads.
         if let Ok(ours) = ours {
             let _ = ours.shutdown(std::net::Shutdown::Both);
@@ -741,7 +758,7 @@ impl Core {
         if let Some(snapshot) = st.screens.remove(&id).and_then(|s| s.snapshot())
             && let Err(e) = write_atomic(&self.snapshot_path(id), &snapshot)
         {
-            eprintln!("core: cannot save screen of {}: {e}", crate::terminals::address(id));
+            crate::log!("core: cannot save screen of {}: {e}", crate::terminals::address(id));
         }
         // `--rm`: gone now, unless its parent is waiting for the exit code.
         let rm = st.reg.terminals.get(&id).is_some_and(|t| {

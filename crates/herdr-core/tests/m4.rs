@@ -2,9 +2,13 @@
 
 mod common;
 
-use common::framed::Viewer;
+use common::framed::{Framed, Viewer};
 use common::*;
+use herdr_core::wire;
 use serde_json::{Value, json};
+use std::io::{BufRead, Read, Write};
+use std::net::Shutdown;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 fn session() -> Session {
@@ -192,6 +196,233 @@ fn agents_never_type_into_a_persons_unsent_draft() {
     person.typed(b"\r");
     assert!(sending.join().unwrap().status.success());
     shows(&s, &t, "78");
+}
+
+/// Waits until `t` has printed `needle` `n` times.
+fn shows_n(s: &Session, t: &str, needle: &str, n: usize) {
+    wait_until(&format!("{n} {needle:?} in {t}"), || text(s, t).matches(needle).count() == n);
+}
+
+fn core_log(s: &Session) -> String {
+    std::fs::read_to_string(s.root.join("state/herdr-core/test/core.log")).unwrap_or_default()
+}
+
+#[test]
+fn a_draft_typed_then_backspaced_away_lets_sends_in() {
+    let mut s = session();
+    s.env.push(("HC_DRAFT_MAX_MS".into(), "5000".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    person.typed(b"hi");
+    shows(&s, &t, "69");
+    assert_eq!(s.json(&["get", &t])["draft"]["chars"], 2, "hc get shows it");
+    person.typed(b"\x7f");
+    person.typed(b"\x7f"); // the input is empty again; they never pressed Enter, ctrl+c or ctrl+u
+    shows_n(&s, &t, "7f", 2);
+    assert!(s.json(&["get", &t]).get("draft").is_none(), "no draft left");
+    let started = Instant::now();
+    s.json(&["send", &t, "x"]);
+    assert!(started.elapsed() < Duration::from_millis(4000), "waited only for the quiet time: {:?}", started.elapsed());
+    shows(&s, &t, "78");
+}
+
+#[test]
+fn a_draft_edited_after_a_left_arrow_still_holds_sends() {
+    let mut s = session();
+    s.env.push(("HC_DRAFT_MAX_MS".into(), "1500".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    // Moved the cursor, then backspaced: the core can't tell what is left, so it waits.
+    person.typed(b"hi");
+    shows(&s, &t, "69"); // its tty is raw now: a DEL is a byte, not an erase
+    person.typed(b"\x1b[D\x7f\x7f");
+    shows_n(&s, &t, "7f", 2);
+    let viewers = s.json(&["viewers", &t]);
+    let draft = &viewers["draft"];
+    assert_eq!(draft["chars"], Value::Null, "{viewers}");
+    assert_eq!(draft["attached"], true, "{viewers}");
+    assert_eq!(draft["by"]["connection_id"], viewers["viewers"][0]["identity"]["connection_id"], "{viewers}");
+    assert!(draft["since_ms"].as_u64().unwrap() > 0 && draft["expires_in_ms"].as_u64().unwrap() > 500_000, "{viewers}");
+    let (_, err) = s.err(&["send", &t, "x"]);
+    assert_eq!(err["error"]["kind"], "drafting", "{err}");
+    let hint = err["error"]["hint"].as_str().unwrap();
+    assert!(hint.contains("ctrl+u") && hint.contains(&format!("hc get {t}")), "the hint says how it ends: {hint}");
+    assert!(!text(&s, &t).contains("78"));
+    // ctrl+u still clears it.
+    person.typed(b"\x15");
+    shows(&s, &t, "15");
+    s.json(&["send", &t, "x"]);
+    shows(&s, &t, "78");
+}
+
+#[test]
+fn an_idle_draft_expires_after_n_and_a_send_then_types() {
+    let mut s = session();
+    s.env.push(("HC_DRAFT_IDLE_MS".into(), "2000".into()));
+    s.env.push(("HC_DRAFT_MAX_MS".into(), "20000".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    let typed = Instant::now();
+    person.typed(b"hi\x1b[D"); // a draft the core can't follow, left there
+    shows(&s, &t, "44");
+    s.json(&["send", &t, "x"]);
+    // Counted from the person's last key, not from the send (a slow box may take a while to show it).
+    let waited = typed.elapsed();
+    assert!(waited >= Duration::from_millis(2000), "it waited for the draft to expire: {waited:?}");
+    assert!(waited < Duration::from_millis(8000), "then typed once it expired: {waited:?}");
+    shows(&s, &t, "78");
+    let log = core_log(&s);
+    assert_eq!(log.matches("expired (nobody typed on it for").count(), 1, "one line: {log}");
+    assert!(log.contains(&format!("core: {t}: the draft a person began by viewer c")), "{log}");
+    drop(person);
+}
+
+#[test]
+fn a_draft_whose_only_viewer_detached_expires() {
+    let mut s = session();
+    s.env.push(("HC_DRAFT_LEFT_MS".into(), "4000".into()));
+    s.env.push(("HC_DRAFT_MAX_MS".into(), "20000".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    person.typed(b"hi\x1b[D");
+    shows(&s, &t, "44");
+    drop(person);
+    wait_until("detached", || s.json(&["viewers", &t])["viewers"].as_array().unwrap().is_empty());
+    assert_eq!(s.json(&["get", &t])["draft"]["attached"], false);
+    let started = Instant::now();
+    s.json(&["send", &t, "x"]);
+    assert!(started.elapsed() < Duration::from_millis(8000), "after {:?}", started.elapsed());
+    shows(&s, &t, "78");
+    let log = core_log(&s);
+    assert_eq!(log.matches("detached").count(), 1, "one line: {log}");
+    assert!(log.contains("and no viewer is left); agents' text types again"), "{log}");
+}
+
+#[test]
+fn calls_queued_behind_one_draft_give_up_together() {
+    let mut s = session();
+    s.env.push(("HC_DRAFT_MAX_MS".into(), "1500".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    person.typed(b"hi");
+    shows(&s, &t, "69");
+
+    // The limit counts from when each send arrived: three behind one draft
+    // fail after 1.5 s, not one after another (4.5 s).
+    let started = Instant::now();
+    let senders: Vec<_> = (0..3)
+        .map(|n| {
+            let mut cmd = s.cmd();
+            cmd.args(["send", &t, &format!("m{n}")]);
+            std::thread::spawn(move || cmd.output().unwrap())
+        })
+        .collect();
+    for sender in senders {
+        let out = sender.join().unwrap();
+        assert!(String::from_utf8_lossy(&out.stderr).contains("drafting"), "{out:?}");
+    }
+    assert!(started.elapsed() < Duration::from_millis(3200), "gave up after {:?}", started.elapsed());
+    assert!(!text(&s, &t).contains("6d"), "nothing typed: {}", text(&s, &t));
+}
+
+/// A caller is gone when its connection is hung up, not when it stops writing: a client may
+/// half-close and still read its answer (`hc connect` does once its stdin ends; `nc -N`).
+#[test]
+fn a_caller_that_half_closes_still_has_its_waiting_send_typed_and_answered() {
+    let mut s = session();
+    s.env.push(("HC_QUIET_MS".into(), "1500".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    person.typed(b"\x1b[A"); // no draft, but the send waits for them to pause
+    let mut conn = s.connect();
+    let request = json!({"jsonrpc": "2.0", "id": 1, "method": "terminal.send", "params": {"terminal": t, "text": "x"}});
+    writeln!(conn.writer, "{request}").unwrap();
+    conn.writer.shutdown(Shutdown::Write).unwrap();
+    let mut reply = String::new();
+    conn.reader.read_line(&mut reply).unwrap();
+    let reply: Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(reply["id"], 1, "{reply}");
+    assert!(reply.get("error").is_none() && reply["result"]["via"] == "typed", "{reply}");
+    shows(&s, &t, "78");
+}
+
+/// What a client pipelines behind a waiting call is not read away: the plain requests after
+/// it, a hello, and the frames after that are all answered.
+#[test]
+fn a_waiting_send_leaves_what_was_pipelined_behind_it() {
+    let mut s = session();
+    s.env.push(("HC_QUIET_MS".into(), "1500".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    person.typed(b"\x1b[A");
+    let mut conn = s.connect();
+    let call =
+        |id: u64, method: &str, params: Value| json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let mut batch = format!(
+        "{}\n{}\n",
+        call(1, "terminal.send", json!({"terminal": t, "text": "x"})),
+        call(2, "hello", json!({"framed": true}))
+    )
+    .into_bytes();
+    batch.extend(wire::encode(0, wire::DATA, call(3, "terminal.get", json!({"terminal": t})).to_string().as_bytes()));
+    conn.writer.write_all(&batch).unwrap(); // one batch; both directions stay open
+    let mut line = String::new();
+    for want in [1, 2] {
+        line.clear();
+        conn.reader.read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], want, "{reply}");
+        assert!(reply.get("error").is_none(), "{reply}");
+    }
+    let mut header = [0u8; wire::HEADER];
+    conn.reader.read_exact(&mut header).expect("the frame after the hello was answered");
+    let (_, _, len) = wire::decode_header(&header).unwrap();
+    let mut payload = vec![0; len];
+    conn.reader.read_exact(&mut payload).unwrap();
+    let reply: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!((reply["id"].clone(), reply["result"]["address"].as_str()), (json!(3), Some(t.as_str())), "{reply}");
+}
+
+#[test]
+fn a_call_whose_caller_is_gone_types_nothing() {
+    let mut s = session();
+    s.env.push(("HC_QUIET_MS".into(), "1500".into()));
+    let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
+    let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
+    person.typed(b"hi"); // a draft, not sent
+    shows(&s, &t, "69");
+    let log = || std::fs::read_to_string(s.root.join("state/herdr-core/test/core.log")).unwrap_or_default();
+    let killed_after = |args: &[&str], wait: Duration| {
+        let mut child = s.cmd().args(args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        std::thread::sleep(wait);
+        child.kill().unwrap(); // what `timeout` does
+        child.wait().unwrap();
+    };
+
+    // A send killed while it waits for the draft.
+    killed_after(&["send", &t, "x"], Duration::from_millis(500));
+    wait_until("the core logs it", || log().contains(&format!("terminal.send to {t}")));
+    // An app on a framed connection that goes away.
+    let mut app = Framed::open(&s);
+    let call = json!({"jsonrpc": "2.0", "id": 1, "method": "terminal.send", "params": {"terminal": t, "text": "z"}});
+    app.send(0, wire::DATA, call.to_string().as_bytes());
+    std::thread::sleep(Duration::from_millis(500));
+    drop(app);
+    wait_until("the core logs it too", || log().matches("its caller went away").count() == 2);
+    // Keys waiting for the person to pause.
+    person.typed(b"\x1b[A");
+    killed_after(&["keys", &t, "a"], Duration::from_millis(300));
+    wait_until("and the keys", || log().contains(&format!("terminal.keys to {t}")));
+
+    // They send their draft; only what is sent afterwards is typed.
+    person.typed(b"\r");
+    s.json(&["send", &t, "y"]);
+    shows(&s, &t, "79");
+    std::thread::sleep(Duration::from_millis(500));
+    let typed = text(&s, &t);
+    for dropped in ["78", "7a", "61"] {
+        assert!(!typed.contains(dropped), "a dropped call was typed ({dropped}): {typed}");
+    }
 }
 
 #[test]

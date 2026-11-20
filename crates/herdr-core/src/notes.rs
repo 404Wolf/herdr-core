@@ -293,7 +293,7 @@ impl Core {
             return Ok(queued);
         }
         let typed = self
-            .type_in(parent, quiet, true, |st, t| {
+            .type_in(parent, quiet, true, &crate::input::Gone::default(), |st, t| {
                 if !can_take_note(t) {
                     return Err(RpcError::new("busy", "the parent got busy", ""));
                 }

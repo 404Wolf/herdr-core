@@ -81,11 +81,17 @@ pub(crate) fn tail(text: String, id: u32) -> String {
 }
 
 /// A stopping core starts nothing: whatever it started now would outlive the stop.
-pub(crate) fn not_stopping(st: &crate::runtime::State) -> Result<(), RpcError> {
-    match st.stopping {
-        true => Err(RpcError::new("unavailable", "the core is stopping", "run it again once it has stopped")),
-        false => Ok(()),
+/// Nor does one that is restarting: it would not be in the registry the next core loads,
+/// and the next core kills what its registry doesn't list. (Check and creation both
+/// happen under the state lock, which `restart::prepare` takes to set the flag.)
+pub(crate) fn not_stopping(core: &Core, st: &crate::runtime::State) -> Result<(), RpcError> {
+    if st.stopping {
+        return Err(RpcError::new("unavailable", "the core is stopping", "run it again once it has stopped"));
     }
+    if core.restart.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(RpcError::new("unavailable", "the core is restarting", "run it again once it has restarted"));
+    }
+    Ok(())
 }
 
 pub(super) async fn start(
@@ -93,7 +99,7 @@ pub(super) async fn start(
     p: RunParams,
     template: Option<crate::templates::Template>,
 ) -> Result<Terminal, RpcError> {
-    not_stopping(&core.lock())?;
+    not_stopping(core, &core.lock())?;
     core.ensure_holder().await.map_err(|e| {
         RpcError::new(
             "unavailable",
@@ -132,7 +138,7 @@ pub(super) async fn start(
     };
     let (id, rx) = {
         let mut st = core.lock();
-        not_stopping(&st)?;
+        not_stopping(core, &st)?;
         let instance = st
             .current()
             .ok_or_else(|| {

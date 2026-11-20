@@ -75,6 +75,23 @@ impl AsyncListener {
     }
 }
 
+/// How often `peer_gone` looks. A call it watches waits for a person (seconds to minutes).
+const PEER_LOOK: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Resolves once the client at the other end of a connection has gone for good: closed its
+/// end entirely or reset the connection (the kernel reports the socket hung up, as for a
+/// killed process). A client that only shut down its sending side (`hc connect` does, once
+/// its stdin ends; `nc -N`) still reads its answer, so that is not gone. It reads nothing:
+/// whatever a client has pipelined behind the call stays for the protocol to parse.
+pub(crate) async fn peer_gone(read: &AsyncRead) {
+    use tokio::io::Interest;
+    // Write readiness carries the "hung up" bit, and answers at once from what the reactor
+    // has seen: looking is a cheap check, not a wait.
+    while !read.ready(Interest::WRITABLE).await.is_ok_and(|ready| ready.is_write_closed()) {
+        tokio::time::sleep(PEER_LOOK).await;
+    }
+}
+
 pub fn remove_endpoint(path: &Path) {
     let _ = std::fs::remove_file(path);
 }

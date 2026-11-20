@@ -8,7 +8,7 @@ use herdr_core::wire;
 use serde_json::json;
 
 #[test]
-fn local_windows_share_a_real_pty_size_but_remote_input_still_takes_over() {
+fn local_windows_share_a_real_pty_size_and_remote_input_never_shrinks_it() {
     let s = Session::new();
     let t = run(&s, &["sh", "-c", "while read l; do stty size; done"]);
     let (mut app_a, mut a) = desktop(&s);
@@ -36,16 +36,21 @@ fn local_windows_share_a_real_pty_size_but_remote_input_still_takes_over() {
     assert_eq!(size(), (80, 20));
     wait_until("PTY sees the shared size", || text(&s, &t).contains("20 80"));
 
+    // Desktop first: a visible, measured desktop window keeps the grid; a
+    // phone attaching or typing never shrinks it.
     let mut phone = Viewer::attach(&s, &t, 40, 10, json!({}));
-    assert_eq!(size(), (40, 10));
+    phone.conn.call("terminal.get", json!({"terminal": t}));
+    assert_eq!(size(), (80, 20), "a phone attaching does not shrink the desktop grid");
+    phone.typed(b"phone\r");
+    phone.conn.call("terminal.get", json!({"terminal": t}));
+    assert_eq!(size(), (80, 20), "remote input does not take size control");
+    wait_until("PTY keeps the desktop size after remote input", || text(&s, &t).matches("20 80").count() >= 2);
     a.send(ca, wire::FOCUS, &[1]);
     a.call("terminal.get", json!({"terminal": t}));
     assert_eq!(size(), (80, 20));
-    phone.typed(b"phone\r");
-    phone.conn.call("terminal.get", json!({"terminal": t}));
-    assert_eq!(size(), (40, 10));
     drop(phone);
-    wait_until("desktop takes over after phone detaches", || size() == (80, 20));
+    a.call("terminal.get", json!({"terminal": t}));
+    assert_eq!(size(), (80, 20), "the desktop grid is unchanged after the phone detaches");
 
     let config = s.root.join("config/herdr-core/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();

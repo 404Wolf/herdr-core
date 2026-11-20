@@ -1,8 +1,8 @@
 //! `hc`: one API call per command. Tables for people, JSON when piped or `--json`.
 
 use crate::api::{
-    AttachParams, ExecParams, InterruptParams, KeysParams, LabelParams, ListParams, PutParams, ReadParams, RunParams,
-    SendParams, SubscribeParams, TerminalParams, WaitParams,
+    AttachParams, ExecParams, InterruptParams, KeysParams, LabelParams, ListParams, PutParams, ReadParams,
+    RestartParams, RunParams, SendParams, SubscribeParams, TerminalParams, ViewerListParams, WaitParams,
 };
 use crate::client;
 use crate::paths::Paths;
@@ -41,6 +41,8 @@ enum Cmd {
     Ls(ListParams),
     /// Show one terminal.
     Get(TerminalParams),
+    /// Show attached viewers and the local sizing decision for one terminal.
+    Viewers(ViewerListParams),
     /// End a terminal's program (hangup, then escalate).
     Kill(TerminalParams),
     /// Remove a finished terminal.
@@ -130,7 +132,9 @@ enum ServerCmd {
     Stop,
     Status,
     /// Restart the core (e.g. after an update); programs keep running.
-    Restart,
+    /// Refused while the core can't save its terminals (a full disk): the next
+    /// core would kill every live terminal missing from the saved registry.
+    Restart(RestartParams),
 }
 
 const HELP: &str = include_str!("help.txt");
@@ -394,18 +398,18 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             if !r["wait"].is_null() {
                 human = format!("{human}\n{}", describe_wait(&r["wait"]));
             }
-            Out { json: r, human }
+            Out { human: with_warning(human, &r), json: r }
         }
         Cmd::Keys(mut p) => {
             p.caller = Some(caller());
             let r = call("terminal.keys", to(&p))?;
-            Out { json: r, human: "keys sent".into() }
+            Out { human: with_warning("keys sent".into(), &r), json: r }
         }
         Cmd::Interrupt(mut p) => {
             p.terminal = pick(p.terminal)?;
             let r = call("terminal.interrupt", to(&p))?;
             let human = format!("sent {}: {}", r["key"].as_str().unwrap_or("?"), r["outcome"].as_str().unwrap_or("?"));
-            Out { json: r, human }
+            Out { human: with_warning(human, &r), json: r }
         }
         Cmd::Run(mut p) => {
             if p.on.is_none() {
@@ -460,6 +464,11 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             (p.terminal, p.caller) = (pick(p.terminal)?, Some(caller()));
             let r = call("terminal.get", to(&p))?;
             let human = describe(&r);
+            Out { json: r, human }
+        }
+        Cmd::Viewers(p) => {
+            let r = call("terminal.viewers", to(&p))?;
+            let human = viewers(&r);
             Out { json: r, human }
         }
         Cmd::Kill(mut p) => {
@@ -570,11 +579,14 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             let human = serde_json::to_string_pretty(&r).unwrap_or_default();
             Out { json: r, human }
         }
-        Cmd::Server { action: action @ (ServerCmd::Start | ServerCmd::Status | ServerCmd::Restart) } => {
-            if matches!(action, ServerCmd::Restart)
+        Cmd::Server { action: action @ (ServerCmd::Start | ServerCmd::Status | ServerCmd::Restart(_)) } => {
+            if let ServerCmd::Restart(p) = &action
                 && let Some(stream) = client::connect_existing(&paths)
             {
-                client::call(&stream, "server.restart", json!({}))?;
+                let r = client::call(&stream, "server.restart", to(p))?;
+                if let Some(warning) = r["warning"].as_str() {
+                    eprintln!("hc: {warning}");
+                }
                 wait_closed(&stream);
             }
             let r = if crate::platform::status_may_start_core() {
@@ -588,13 +600,16 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
                 client::call(&stream, "server.status", json!({}))?
             };
             let id = r["core"]["id"].as_str().unwrap_or("?");
-            let human = format!(
+            let mut human = format!(
                 "core {} ({}) running, pid {}, up {}s",
                 r["core"]["name"].as_str().unwrap_or("?"),
                 id.get(..8).unwrap_or(id),
                 r["pid"],
                 r["uptime_ms"].as_u64().unwrap_or(0) / 1000
             );
+            if let Some(reason) = r["saving"]["reason"].as_str() {
+                human = format!("{human}\nnot saving its terminals: {reason}");
+            }
             Out { json: r, human }
         }
         Cmd::Server { action: ServerCmd::Stop } => stop(&paths)?,
@@ -873,6 +888,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("run", "terminal.run"),
     ("ls", "terminal.list"),
     ("get", "terminal.get"),
+    ("viewers", "terminal.viewers"),
     ("kill", "terminal.kill"),
     ("rm", "terminal.rm"),
     ("label", "terminal.label"),

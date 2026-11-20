@@ -15,6 +15,7 @@ pub mod input;
 mod kept;
 pub mod keys;
 pub mod locale;
+mod log;
 pub mod machines;
 pub mod notes;
 pub mod paths;

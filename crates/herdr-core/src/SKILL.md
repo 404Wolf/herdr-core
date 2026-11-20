@@ -59,6 +59,7 @@ failed send: it may still have arrived; read first.
 ```sh
 hc ls                              # all live terminals, not just yours
 hc get review                      # one terminal's observed state/status
+hc viewers review                  # attached viewers and the exact selected grid (local core only)
 hc send review "Focus on the first bug"
 hc send --wait review "Recheck the fix"
 hc read --lines 100 review          # screen plus history; waits return status only
@@ -120,7 +121,22 @@ error, exited); inspect its screen.
 
 `send` and these notes wait until nobody has typed for ~3 s, and never join a
 draft a person left unsent: they wait for it to be sent or cleared, and after
-2 minutes `send` fails with `drafting` (nothing typed). A program that reads
+2 minutes `send` fails with `drafting` (nothing typed). That wait counts from
+when the send arrives, so sends queued behind one draft give up together. A
+draft of plain text backspaced away character by character is gone; with
+anything else in it (an arrow, Esc, a paste, a word deleted, the mouse, an
+agent's input, keys pressed while an agent's text went in) only Enter,
+ctrl+c or ctrl+u ends it, and a draft expires once
+nobody typed on that terminal for 10 minutes, or a minute after the viewer
+that typed it detached with no viewer left; then sends type again.
+`hc get <t> --json` shows a waiting draft as `draft` (since, by which viewer). A
+send still waiting when its caller goes away (its `hc` was killed, say by
+`timeout`, or its connection hung up) is dropped: nothing is typed, and the
+core logs it. (A client that only stops writing, as `hc connect` does once
+its stdin ends, is not gone: it gets its answer. Not noticed on Windows.) So never loop `hc send` or put it under a `timeout` shorter than
+2 minutes: a send that waits has not failed, and each retry only queues
+another. If one failed or was killed, `hc read` the target first and resend at
+most once. A program that reads
 its own messages out of band runs `hc inbox --follow` in its terminal: while it
 does, sends and notes to it are queued there, in order, as JSON lines `{id,
 from, text, kind, ts}` (`kind` send or note), instead of typed; `hc inbox ack
@@ -131,6 +147,19 @@ fails with `not_following`. Give it `--key <k>` to make a retry safe: a key
 queued on that terminal in the last hour (`server status`'s
 `queue_keys_kept_ms`) isn't queued again (`repeated: true`); `--core <id>`
 makes sure it's that core.
+
+A `warning` in the answer of `send`, `keys` or `interrupt` means the call went
+through but core could not save its terminals just now (a full disk, say). It
+keeps trying on its own: don't repeat the call. `hc server status` says the
+same once, as `saving` with `since_ms` and `reason`.
+
+`hc server restart` first saves the registry and waits for it, and refuses if
+it can't: the next core kills every terminal its registry doesn't list. From
+the moment it is asked, `run` and `exec` refuse until the core is back.
+`hc server restart --force-stale-registry` restarts anyway, and says which
+terminals that kills (the live ones missing from the registry saved on disk,
+read from the file), or that it can't tell: only for a restart that can't
+wait, such as a disk that won't recover. Otherwise free the disk.
 
 ## Run programs
 
@@ -145,9 +174,19 @@ Attach replays primary-screen history with soft wraps joined, so the viewer
 can wrap it and reflow it on resize. Explicit newlines stay hard line breaks.
 
 On Linux, local Herdr app windows share the smallest reported columns and
-rows while the desktop is active. Focus between those windows keeps that
-grid; colors and cell facts still follow the latest active viewer. A phone,
-SSH client, or other viewer takes size control when active, as before.
+rows while the desktop is active. A visible, measured desktop pane owns sizing
+before phones, SSH clients or other secondary viewers, regardless of which was
+most recently active. With grouped sizing, visible panes in the selected
+desktop group share the smaller grid. `size_policy = "latest"` selects the
+latest active desktop pane instead; secondary viewers control size only when no
+eligible desktop pane remains. Focus between desktop panes keeps the shared
+grid; colors and cell facts follow the selected sizing leader.
+`hc viewers <t>` reports attached viewers, negotiated resize/visibility
+capabilities, offered and selected grids, and the exact sizing candidates.
+It is read-only and local to the current core; it never queries peers. Legacy
+viewers without visibility updates remain visible until their connection ends.
+Viewer identities are connection-lifetime IDs; a same-uid local socket PID is
+shown when available (it may be an `hc connect` helper, not the app process).
 The same desktop group is forwarded when attaching to another machine;
 both cores must have this support. `terminal.attach`'s `desktop_group` is
 core-to-core metadata: ordinary clients cannot claim a group. Forwarded
@@ -156,18 +195,50 @@ The core hosting the terminal applies its `size_policy` setting.
 Taller desktop panes get a cleared replacement paint when the grid or pane
 changes size. Their scrolling region stays within the shared grid; `CSI r` and `RIS`
 resets are bounded too, so old rows do not remain below an inline TUI.
-This uses terminal bytes; the app does not need resize-frame support.
+Legacy apps use terminal bytes for the taller-pane repair. Viewers opting into
+`terminal.attach`'s `resize_notifications` get ordered core-to-viewer RESIZE
+frames before replacement paints, including their initial grid. This works for
+interactive viewers too: render those rows and columns, but keep reporting the
+pane's available geometry separately. The reply confirms support across the
+whole path; false or absent retains legacy sizing. A reconnect that loses
+negotiated support ends the stream rather than sending an incompatible paint.
 Observers never control size, and a viewer returning after a dropped line
 does not constrain the desktop until active again. Attach placeholders are
 ignored until a window reports geometry. Sized desktop viewers keep their
-constraints while idle, until they detach or report a new size. The app
-keeps background tabs attached without reporting visibility, so a hidden
-tab can also constrain the grid and leave extra blank pane space. Exact
-visibility needs app support. Other operating systems retain latest-active
-sizing for local viewers, but accept forwarded desktop groups. Set
-`size_policy = "latest"` in `~/.config/herdr-core/config.toml` to restore
-latest-active sizing on Linux too (default: `"grouped"`). No restart needed;
-the setting applies on the next viewer activity or detach.
+constraints while idle, until hidden, detached or resized. Desktop apps may opt
+into `visibility_updates` on attach; `visible` defaults to true for old clients.
+The reply confirms the feature only when every relay hop supports it. Such apps
+send kind-7 VISIBILITY on compositor-visible active-workspace changes, separate
+from focus. Hidden views do not constrain the grouped grid. A hidden resumed
+view stays pending until it is shown and reports a positive physical RESIZE.
+Without negotiated support, clients stay visible/eligible as before. The
+hosting core applies its `size_policy` to choose group-fit versus latest
+desktop sizing; secondary viewers remain fallback-only. Set
+`size_policy = "latest"` in `~/.config/herdr-core/config.toml` to use the
+latest active desktop pane instead of fitting the group (default: `"grouped"`).
+Secondary viewers remain fallback-only. No restart needed;
+the setting applies on the next viewer activity, visibility change or detach.
+
+The device used last wins (hello feature `focus_by_use`). Apps may opt into
+`focus_updates` on attach (with `focused`, the window's keyboard focus at
+attach, and `idle_ms` for an attach nobody caused just now; hello feature
+`viewer_focus`) and then send kind-8 WINDOW_FOCUS (1 focused or used again,
+0 not) on every channel of a window whose keyboard focus changes; a phone
+also sends 1 on resume and on a touch. Kind-4 FOCUS keeps its program-focus
+meaning. Once a focus-reporting viewer has been focused, the one used last
+sets the grid with its own size: its latest WINDOW_FOCUS(1) or real input
+(typed, clicked, pasted; never output, terminal replies or AUTOMATIC_INPUT),
+or for a phone that sends no focus, its latest activity. If that one is
+hidden or unmeasured, the focused visible one used last leads; otherwise the
+grid is held. Old desktop apps and relays without the feature only receive
+the grid while a reporter decides.
+Relays forward WINDOW_FOCUS per downstream viewer and confirm `focus_updates`
+only when every hop does; `hc viewers` shows `focus=yes|no|n/a` per channel.
+`hc viewers <t>` shows this core's attached views, verified local socket peer
+PID when available, offered geometry, effective visibility, selector eligibility,
+and the shared grid decision. It is local-only and read-only. Legacy viewers
+without visibility negotiation remain visible until their connection detaches;
+there is no idle timeout.
 
 ```sh
 hc run cargo test                  # wait, stream output, return its exit code
@@ -319,3 +390,8 @@ paths start at your current folder. Prefer explicit paths for remote work.
   3 not_found, 7 needs_target, 9 blocked, 10 status_mismatch, 11 finished.
 - Codex must run with `--no-daemon` (including templates), or its commands
   execute outside hc.
+
+`hc machine ls` includes each connected core’s precise build identity. `≠` means
+that live peer differs from the serving core; `unknown` means its hello did not
+include an identity (or it is disconnected). Connected peers without an identity
+are older builds and also marked `≠`; disconnected peers are unmarked.

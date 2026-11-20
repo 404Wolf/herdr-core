@@ -159,6 +159,14 @@ pub(super) fn short(t: &Value) -> Value {
     Value::Object(out)
 }
 
+/// A call that went through but whose registry save failed says so after its own line.
+pub(super) fn with_warning(human: String, r: &Value) -> String {
+    match r["warning"].as_str() {
+        Some(warning) => format!("{human}\nwarning: {warning}"),
+        None => human,
+    }
+}
+
 pub(super) fn describe_wait(r: &Value) -> String {
     let t = r["terminal"].as_str().unwrap_or("?");
     let mut lines: Vec<String> = r["children"].as_array().into_iter().flatten().map(describe_wait).collect();
@@ -231,6 +239,118 @@ pub(super) fn table(r: &Value) -> String {
     out
 }
 
+/// Attached views on one local terminal and the exact current sizing decision.
+pub(super) fn viewers(r: &Value) -> String {
+    let grid =
+        |value: &Value| format!("{}x{}", value["cols"].as_u64().unwrap_or(0), value["rows"].as_u64().unwrap_or(0));
+    let leader = r["leader"].as_object().map_or_else(
+        || "none".into(),
+        |id| format!("c{}/ch{}", id["connection_id"].as_u64().unwrap_or(0), id["channel"].as_u64().unwrap_or(0)),
+    );
+    let selected = r["selected_grid"].as_object().map_or_else(|| "held".into(), |_| grid(&r["selected_grid"]));
+    let mut lines = vec![format!(
+        "{}  PTY {}  selected {}  leader {}{}",
+        r["terminal"].as_str().unwrap_or("?"),
+        grid(&r["current_grid"]),
+        selected,
+        leader,
+        if r["focus_authority"] == true { "  (focused window decides)" } else { "" }
+    )];
+    let entries = r["viewers"].as_array().map(Vec::as_slice).unwrap_or_default();
+    if entries.is_empty() {
+        lines.push("no attached viewers".into());
+    }
+    for v in entries {
+        let id = &v["identity"];
+        let connection = id["connection_id"].as_u64().unwrap_or(0);
+        let channel = id["channel"].as_u64().unwrap_or(0);
+        let origin = match v["origin"].as_str().unwrap_or("local_client") {
+            "local_desktop" => "local desktop".to_owned(),
+            "relayed" => format!("relayed via {}", v["peer"].as_str().unwrap_or("?")),
+            _ => "local client".to_owned(),
+        };
+        let pid = v["peer_pid"].as_u64().map(|pid| format!(" pid={pid}")).unwrap_or_default();
+        let visibility = if v["visible"] == true { "visible" } else { "hidden" };
+        let eligibility = if v["size_eligible"] == true { "eligible" } else { "excluded" };
+        let focus = if v["focus_updates"] != true {
+            "n/a"
+        } else if v["focused"] == true {
+            "yes"
+        } else {
+            "no"
+        };
+        let capabilities = format!(
+            "vis={} resize={} focus={focus}",
+            v["visibility_updates"] == true,
+            v["resize_notifications"] == true
+        );
+        let focused_ago = v["focused_ms_ago"].as_u64().map(|ms| format!(", focused {ms}ms ago")).unwrap_or_default();
+        let state = if v["awaiting_size"] == true {
+            "awaiting-size"
+        } else if v["sized"] == true {
+            "sized"
+        } else {
+            "unsized"
+        };
+        let mut roles = Vec::new();
+        if v["observe"] == true {
+            roles.push("observe");
+        }
+        if v["leader"] == true {
+            roles.push("leader");
+        }
+        if v["contributes_to_grid"] == true && v["leader"] != true {
+            roles.push("group-min");
+        }
+        let group = v["desktop_group"].as_object().map_or_else(String::new, |g| {
+            format!(" group={}/{}", g["line"].as_str().unwrap_or("?"), g["group"].as_str().unwrap_or("?"))
+        });
+        let activity = v["active_ms_ago"].as_u64().map_or_else(|| "inactive".into(), |ms| format!("active {ms}ms ago"))
+            + &focused_ago;
+        lines.push(format!(
+            "c{connection}/ch{channel}  {}{}  {} {} {}  offer={}  {}  {}{}{}",
+            origin,
+            pid,
+            visibility,
+            eligibility,
+            state,
+            grid(&v["offered"]),
+            capabilities,
+            activity,
+            group,
+            if roles.is_empty() { String::new() } else { format!("  [{}]", roles.join(",")) }
+        ));
+    }
+    if let Some(draft) = draft(&r["draft"]) {
+        lines.push(draft);
+    }
+    lines.join("\n")
+}
+
+/// A person's unsent draft, which agents' text waits for (`draft` in `hc get`, `hc viewers`).
+fn draft(d: &Value) -> Option<String> {
+    let since = d["since_ms"].as_u64()?;
+    let secs = |ms: u64| match ms / 1000 {
+        s if s < 120 => format!("{s}s"),
+        s => format!("{}m", s / 60),
+    };
+    let by = d["by"].as_object().map_or_else(String::new, |by| {
+        format!(
+            " by c{}/ch{}{}",
+            by["connection_id"].as_u64().unwrap_or(0),
+            by["channel"].as_u64().unwrap_or(0),
+            if d["attached"] == true { "" } else { " (detached)" }
+        )
+    });
+    let chars = d["chars"].as_u64().map_or_else(|| "length unknown".into(), |n| format!("{n} chars"));
+    Some(format!(
+        "draft: unsent{by}, begun {} ago, last input {} ago, {chars}; agents' text waits (expires in {}; Enter, ctrl+c or ctrl+u there ends it)",
+        secs(crate::runtime::now_ms().saturating_sub(since)),
+        secs(d["input_ms_ago"].as_u64().unwrap_or(0)),
+        secs(d["expires_in_ms"].as_u64().unwrap_or(0)),
+    ))
+}
+
 /// How a machine's line is: "connected", "unreachable since 14:02 (why)", ...
 pub(super) fn line_state(m: &Value) -> String {
     let since = m["since_ms"].as_u64().map(|ms| {
@@ -278,7 +398,66 @@ pub(super) fn describe(t: &Value) -> String {
     if let Some(first) = t.get("first_message").filter(|f| f["sent"] == false) {
         description.push_str(&format!("\n  first message NOT sent: {}", first["reason"].as_str().unwrap_or("?")));
     }
+    if let Some(draft) = draft(&t["draft"]) {
+        description.push_str(&format!("\n  {draft}"));
+    }
     description
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewers_output_reports_both_negotiated_capabilities() {
+        let output = viewers(&serde_json::json!({
+            "terminal":"t1",
+            "current_grid":{"cols":80,"rows":24},
+            "selected_grid":{"cols":80,"rows":24},
+            "leader":{"connection_id":3,"channel":1},
+            "viewers":[{
+                "identity":{"connection_id":3,"channel":1},
+                "origin":"local_desktop",
+                "peer_pid":42,
+                "visible":true,
+                "size_eligible":true,
+                "sized":true,
+                "awaiting_size":false,
+                "visibility_updates":true,
+                "resize_notifications":true,
+                "offered":{"cols":80,"rows":24},
+                "active_ms_ago":1,
+                "leader":true,
+                "contributes_to_grid":true
+            }]
+        }));
+        assert!(output.contains("vis=true resize=true focus=n/a"));
+        assert!(output.contains("c3/ch1  local desktop pid=42"));
+    }
+
+    #[test]
+    fn viewers_output_shows_focus_per_channel() {
+        let output = viewers(&serde_json::json!({
+            "terminal":"t1b6",
+            "current_grid":{"cols":359,"rows":74},
+            "selected_grid":{"cols":359,"rows":187},
+            "focus_authority":true,
+            "leader":{"connection_id":5,"channel":2},
+            "viewers":[
+                {"identity":{"connection_id":5,"channel":1},"origin":"relayed","peer":"small-pickle",
+                 "visible":true,"size_eligible":true,"sized":true,"visibility_updates":true,
+                 "resize_notifications":true,"focus_updates":true,"focused":false,"focused_ms_ago":90000,
+                 "offered":{"cols":218,"rows":74}},
+                {"identity":{"connection_id":5,"channel":2},"origin":"relayed","peer":"small-pickle",
+                 "visible":true,"size_eligible":true,"sized":true,"visibility_updates":true,
+                 "resize_notifications":true,"focus_updates":true,"focused":true,"focused_ms_ago":12,
+                 "offered":{"cols":359,"rows":187},"leader":true,"contributes_to_grid":true}
+            ]
+        }));
+        assert!(output.lines().next().unwrap().ends_with("(focused window decides)"), "{output}");
+        assert!(output.contains("c5/ch1  relayed via small-pickle") && output.contains("focus=no"), "{output}");
+        assert!(output.contains("focus=yes") && output.contains("focused 12ms ago"), "{output}");
+    }
 }
 
 /// An exec's output as the program wrote it, then its exit code as ours.

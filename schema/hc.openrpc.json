@@ -27,18 +27,40 @@
             "minimum": 0,
             "type": "integer"
           },
+          "focus_by_use": {
+            "default": false,
+            "description": "With `focus_updates`: the owner sizes by use (`focus_by_use`): the\nviewer used last leads, so WINDOW_FOCUS(1) on each use (a touch, a\nresume) matters. Absent: false (older owner: focused desktop first).",
+            "type": "boolean"
+          },
+          "focus_updates": {
+            "description": "True only when every core on the path accepts WINDOW_FOCUS (kind 8).",
+            "type": "boolean"
+          },
+          "resize_history": {
+            "default": 0,
+            "description": "The `resize_history` the owner applies, 0 unless every core on the\npath has the `resize_history` feature (and `resize_notifications`\nholds). Absent: 0.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
           "resize_notifications": {
-            "description": "True only when the entire path sends RESIZE before replacement paints.\nFalse or absent means the observer must track size changes separately.",
+            "description": "True only when the entire path sends RESIZE before replacement paints.\nFalse or absent means the viewer must track size changes separately.",
             "type": "boolean"
           },
           "terminal": {
             "$ref": "#/components/schemas/Terminal"
+          },
+          "visibility_updates": {
+            "description": "True only when every core on the path accepts viewer visibility updates.",
+            "type": "boolean"
           }
         },
         "required": [
           "channel",
           "terminal",
           "resize_notifications",
+          "visibility_updates",
+          "focus_updates",
           "automatic_input"
         ],
         "type": "object"
@@ -134,6 +156,92 @@
         },
         "required": [
           "version"
+        ],
+        "type": "object"
+      },
+      "DraftAuthor": {
+        "description": "The viewer that typed into a draft last.",
+        "properties": {
+          "channel": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "connection_id": {
+            "description": "As in `hc viewers`: the connection and channel it typed on.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/ViewerOrigin"
+          },
+          "peer": {
+            "description": "Its peer's name, when it typed through another machine.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connection_id",
+          "channel",
+          "origin"
+        ],
+        "type": "object"
+      },
+      "DraftView": {
+        "description": "A person's draft that agents' text waits for (`hc get`, `hc viewers`).",
+        "properties": {
+          "attached": {
+            "description": "That viewer is still attached.",
+            "type": "boolean"
+          },
+          "by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DraftAuthor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The viewer that typed into it last; null if unknown."
+          },
+          "chars": {
+            "description": "The characters it holds, as the core followed the keys; null when it\ncan't tell (anything but plain text and backspaces went in): then only\nsending or clearing it (Enter, ctrl+c, ctrl+u) ends it, or expiry.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expires_in_ms": {
+            "description": "Ms until it expires and agents' text goes in again: after\n`HC_DRAFT_IDLE_MS` (10 min) with nobody typing on the terminal, or\n`HC_DRAFT_LEFT_MS` (1 min) after the viewer that typed it detached\nwith no viewer left.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_ms_ago": {
+            "description": "Ms since a person last typed on this terminal.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "since_ms": {
+            "description": "When the person began typing it, ms since the epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "since_ms",
+          "attached",
+          "input_ms_ago",
+          "expires_in_ms"
         ],
         "type": "object"
       },
@@ -317,8 +425,32 @@
         ],
         "type": "object"
       },
+      "GridSize": {
+        "properties": {
+          "cols": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cols",
+          "rows"
+        ],
+        "type": "object"
+      },
       "HelloResult": {
         "properties": {
+          "build": {
+            "type": "string"
+          },
           "core": {
             "$ref": "#/components/schemas/CoreInfo"
           },
@@ -349,6 +481,7 @@
         "required": [
           "generation",
           "version",
+          "build",
           "core",
           "framed",
           "methods",
@@ -448,6 +581,13 @@
           "outcome": {
             "description": "stopped (left working, or a shell got its prompt back), exited,\nstill_working (no change in time), or unknown (it doesn't report status).",
             "type": "string"
+          },
+          "warning": {
+            "description": "The core could not save its terminals just now (a full disk, say) and\nkeeps trying; this call itself went through, so don't repeat it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -468,6 +608,13 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "warning": {
+            "description": "The core could not save its terminals just now (a full disk, say) and\nkeeps trying; this call itself went through, so don't repeat it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -571,6 +718,16 @@
       "MachineView": {
         "description": "A machine as `machine ls` and `ls` show it: its profile and its line now.",
         "properties": {
+          "build": {
+            "description": "Identity from the live hello, absent for old or disconnected peers.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "build_skew": {
+            "type": "boolean"
+          },
           "host": {
             "description": "What that core calls itself (its hostname).",
             "type": "string"
@@ -634,7 +791,8 @@
           "id",
           "host",
           "version",
-          "state"
+          "state",
+          "build_skew"
         ],
         "type": "object"
       },
@@ -763,6 +921,17 @@
           "die_with_parent": {
             "default": false,
             "type": "boolean"
+          },
+          "draft": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DraftView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`terminal.get` only: a person's unsent draft in it, which agents' text waits for (see `terminal.viewers`); absent: none. Never saved."
           },
           "exit_code": {
             "format": "int32",
@@ -983,6 +1152,25 @@
         ],
         "type": "object"
       },
+      "SavingFailure": {
+        "properties": {
+          "reason": {
+            "description": "Why the newest try failed.",
+            "type": "string"
+          },
+          "since_ms": {
+            "description": "When saving started to fail, ms since the epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "since_ms",
+          "reason"
+        ],
+        "type": "object"
+      },
       "SendResult": {
         "properties": {
           "repeated": {
@@ -1030,6 +1218,13 @@
             "minimum": 0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "warning": {
+            "description": "The core could not save its terminals just now (a full disk, say) and\nkeeps trying; this call itself went through, so don't repeat it.",
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -1137,6 +1332,17 @@
             "minimum": 0,
             "type": "integer"
           },
+          "saving": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SavingFailure"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present while the core can't save its terminals (a full disk, say). It\nkeeps trying and says so here once, instead of failing calls; what\nchanged meanwhile is lost if the core stops before it saves."
+          },
           "uptime_ms": {
             "format": "uint64",
             "minimum": 0,
@@ -1163,6 +1369,13 @@
         "properties": {
           "stopped": {
             "type": "boolean"
+          },
+          "warning": {
+            "description": "A restart with `force_stale_registry`: the terminals the next core will kill.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1270,6 +1483,17 @@
           "die_with_parent": {
             "default": false,
             "type": "boolean"
+          },
+          "draft": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DraftView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`terminal.get` only: a person's unsent draft in it, which agents' text waits for (see `terminal.viewers`); absent: none. Never saved."
           },
           "exit_code": {
             "format": "int32",
@@ -1472,6 +1696,229 @@
         ],
         "type": "object"
       },
+      "ViewerDesktopGroup": {
+        "properties": {
+          "group": {
+            "type": "string"
+          },
+          "line": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "line",
+          "group"
+        ],
+        "type": "object"
+      },
+      "ViewerIdentity": {
+        "properties": {
+          "channel": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "connection_id": {
+            "description": "Monotonic connection ID, unique for this core process lifetime.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connection_id",
+          "channel"
+        ],
+        "type": "object"
+      },
+      "ViewerInfo": {
+        "properties": {
+          "active_ms_ago": {
+            "description": "Milliseconds since last focus/input/size/visibility activity.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "awaiting_size": {
+            "type": "boolean"
+          },
+          "contributes_to_grid": {
+            "description": "Included in the selected group's min-grid, or the selected fallback size.",
+            "type": "boolean"
+          },
+          "desktop_group": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ViewerDesktopGroup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "focus_updates": {
+            "description": "Negotiated WINDOW_FOCUS: the viewer reports whether its window has keyboard focus.",
+            "type": "boolean"
+          },
+          "focused": {
+            "description": "Its window has keyboard focus now (false without `focus_updates`).",
+            "type": "boolean"
+          },
+          "focused_ms_ago": {
+            "description": "Milliseconds since its window last gained keyboard focus; null if never.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "identity": {
+            "$ref": "#/components/schemas/ViewerIdentity"
+          },
+          "input_ms_ago": {
+            "description": "Milliseconds since its last real input (typed, clicked, pasted DATA;\nnever terminal replies or AUTOMATIC_INPUT). With `focused_ms_ago`,\nwhen a focus reporter was last used; the latest used decider leads.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "leader": {
+            "type": "boolean"
+          },
+          "observe": {
+            "type": "boolean"
+          },
+          "offered": {
+            "$ref": "#/components/schemas/GridSize"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/ViewerOrigin"
+          },
+          "peer": {
+            "description": "Connected peer name for a relayed viewer; absent for local connections.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peer_pid": {
+            "description": "Same-uid local Unix socket peer PID (possibly an `hc connect` child, not its GPUI parent).\nNever populated for relayed connections; unavailable credentials/PID are null.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "resize_notifications": {
+            "type": "boolean"
+          },
+          "size_eligible": {
+            "description": "Candidate in the current sizing selector (can be false while visible).",
+            "type": "boolean"
+          },
+          "sized": {
+            "type": "boolean"
+          },
+          "visibility_updates": {
+            "type": "boolean"
+          },
+          "visible": {
+            "description": "Effective visibility; legacy clients remain visible until detach.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "identity",
+          "origin",
+          "offered",
+          "visible",
+          "size_eligible",
+          "visibility_updates",
+          "focus_updates",
+          "focused",
+          "resize_notifications",
+          "observe",
+          "sized",
+          "awaiting_size",
+          "leader",
+          "contributes_to_grid"
+        ],
+        "type": "object"
+      },
+      "ViewerListResult": {
+        "properties": {
+          "current_grid": {
+            "$ref": "#/components/schemas/GridSize"
+          },
+          "draft": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DraftView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A person's unsent draft, which agents' text waits for; absent: none."
+          },
+          "focus_authority": {
+            "description": "A focus-reporting viewer has been focused: only the focused (or last\nfocused) window may set the grid; everyone else only receives it.",
+            "type": "boolean"
+          },
+          "leader": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ViewerIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "selected_grid": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GridSize"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the same selector used by the live resizer currently chooses."
+          },
+          "terminal": {
+            "type": "string"
+          },
+          "viewers": {
+            "items": {
+              "$ref": "#/components/schemas/ViewerInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "terminal",
+          "current_grid",
+          "focus_authority",
+          "viewers"
+        ],
+        "type": "object"
+      },
+      "ViewerOrigin": {
+        "enum": [
+          "local_desktop",
+          "local_client",
+          "relayed"
+        ],
+        "type": "string"
+      },
       "WaitResult": {
         "properties": {
           "children": {
@@ -1561,6 +2008,18 @@
       "paramStructure": "by-name",
       "params": [
         {
+          "description": "Immutable build identity; older cores may omit it.",
+          "name": "build",
+          "required": false,
+          "schema": {
+            "description": "Immutable build identity; older cores may omit it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
           "description": "What that core calls this one (`rohan`), so news about `t7` reaches it as `rohan/t7`.",
           "name": "calls_you",
           "required": false,
@@ -1589,12 +2048,12 @@
           }
         },
         {
-          "description": "Features supported by a core dialing in, including relaying size notifications.",
+          "description": "Features supported by a core dialing in, including relaying size and viewer visibility updates.",
           "name": "features",
           "required": false,
           "schema": {
             "default": [],
-            "description": "Features supported by a core dialing in, including relaying size notifications.",
+            "description": "Features supported by a core dialing in, including relaying size and viewer visibility updates.",
             "items": {
               "type": "string"
             },
@@ -1660,11 +2119,30 @@
       }
     },
     {
-      "description": "Planned restart (e.g. after an update): screens are saved, programs keep running, the next core adopts them.",
-      "errors": [],
+      "description": "Planned restart (e.g. after an update): screens are saved, programs keep running, the next core adopts them. Once asked, terminal.run and machine.exec refuse until it has restarted. It first saves its registry and waits for that: if it can't (a full disk), it refuses with `unavailable` and nothing changes, because the next core kills every terminal its registry doesn't list. `force_stale_registry` restarts anyway; the answer's `warning` names the live terminals missing from the registry saved on disk, which the next core kills.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "unavailable"
+          },
+          "message": "unavailable"
+        }
+      ],
       "name": "server.restart",
       "paramStructure": "by-name",
-      "params": [],
+      "params": [
+        {
+          "description": "Restart even though the core can't save its terminals. The next core\nthen kills every live terminal missing from the registry saved on disk\n(it loads that one), and the answer says which. For a restart that\ncan't wait, such as a disk that won't recover; otherwise free the disk.",
+          "name": "force_stale_registry",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "Restart even though the core can't save its terminals. The next core\nthen kills every live terminal missing from the registry saved on disk\n(it loads that one), and the answer says which. For a restart that\ncan't wait, such as a disk that won't recover; otherwise free the disk.",
+            "type": "boolean"
+          }
+        }
+      ],
       "result": {
         "name": "result",
         "schema": {
@@ -2070,6 +2548,44 @@
       }
     },
     {
+      "description": "Read-only local snapshot of attached viewers and the active sizing selector; never queries peers.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "not_found"
+          },
+          "message": "not_found"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "machine_unknown"
+          },
+          "message": "machine_unknown"
+        }
+      ],
+      "name": "terminal.viewers",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "A local terminal: `t7` or its local name. This query never fans out to peers.",
+          "name": "terminal",
+          "required": true,
+          "schema": {
+            "description": "A local terminal: `t7` or its local name. This query never fans out to peers.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ViewerListResult"
+        }
+      }
+    },
+    {
       "description": "End the program: hangup, then terminate, then kill. Returns the observed result.",
       "errors": [
         {
@@ -2408,6 +2924,20 @@
           }
         },
         {
+          "description": "The stream's starting credit in bytes, at most the usual 256 KiB\nwindow (the default). A relay reattaching a viewer passes what that\nviewer can still take, so bytes it already holds for it count.",
+          "name": "credit",
+          "required": false,
+          "schema": {
+            "description": "The stream's starting credit in bytes, at most the usual 256 KiB\nwindow (the default). A relay reattaching a viewer passes what that\nviewer can still take, so bytes it already holds for it count.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        {
           "description": "Desktop identity forwarded by a core line; ignored from ordinary clients.",
           "name": "desktop_group",
           "required": false,
@@ -2435,6 +2965,26 @@
           }
         },
         {
+          "description": "The client sends WINDOW_FOCUS frames: only the focused window sizes the grid.",
+          "name": "focus_updates",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "The client sends WINDOW_FOCUS frames: only the focused window sizes the grid.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "With `focus_updates`: the window showing this view has keyboard focus now.",
+          "name": "focused",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "With `focus_updates`: the window showing this view has keyboard focus now.",
+            "type": "boolean"
+          }
+        },
+        {
           "description": "Scrollback lines to show first (main screen only).",
           "name": "history",
           "required": false,
@@ -2444,6 +2994,20 @@
             "format": "uint",
             "minimum": 0,
             "type": "integer"
+          }
+        },
+        {
+          "description": "Milliseconds since the view was last used (a person's input or, with\n`focus_updates`, focus there), for an attach nobody caused just now (a\nreconnect, a reattach), focused or not. Without `focus_updates` it\ndates the view's last real input. At or above a year\n(31536000000; send i64::MAX for \"never\"): never used, no focus\nhistory. Absent: a `focused` attach is itself the use; an unfocused\none has not been used.",
+          "name": "idle_ms",
+          "required": false,
+          "schema": {
+            "description": "Milliseconds since the view was last used (a person's input or, with\n`focus_updates`, focus there), for an attach nobody caused just now (a\nreconnect, a reattach), focused or not. Without `focus_updates` it\ndates the view's last real input. At or above a year\n(31536000000; send i64::MAX for \"never\"): never used, no focus\nhistory. Absent: a `focused` attach is itself the use; an unfocused\none has not been used.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         {
@@ -2457,12 +3021,24 @@
           }
         },
         {
-          "description": "Observer understands core-to-viewer RESIZE before replacement paints.",
+          "description": "With `resize_notifications`: scrollback lines each repaint after a RESIZE\ncarries (main screen only), after `ESC[3J` so they replace the viewer's\nhistory. 0: the repaint is the screen only. At most 100000 (more counts\nas 100000). If the whole of it would be over 2 MiB, that repaint is the\nscreen only, without `ESC[3J`.",
+          "name": "resize_history",
+          "required": false,
+          "schema": {
+            "default": 0,
+            "description": "With `resize_notifications`: scrollback lines each repaint after a RESIZE\ncarries (main screen only), after `ESC[3J` so they replace the viewer's\nhistory. 0: the repaint is the screen only. At most 100000 (more counts\nas 100000). If the whole of it would be over 2 MiB, that repaint is the\nscreen only, without `ESC[3J`.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Viewer understands core-to-viewer RESIZE before replacement paints.",
           "name": "resize_notifications",
           "required": false,
           "schema": {
             "default": false,
-            "description": "Observer understands core-to-viewer RESIZE before replacement paints.",
+            "description": "Viewer understands core-to-viewer RESIZE before replacement paints.",
             "type": "boolean"
           }
         },
@@ -2494,6 +3070,26 @@
             "description": "The terminal: `t7`, a name, or `machine/t7`.",
             "type": "string"
           }
+        },
+        {
+          "description": "The client understands the viewer-to-core VISIBILITY frame.",
+          "name": "visibility_updates",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "The client understands the viewer-to-core VISIBILITY frame.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "The view is visible on an active workspace and may constrain grouped desktop size.",
+          "name": "visible",
+          "required": false,
+          "schema": {
+            "default": true,
+            "description": "The view is visible on an active workspace and may constrain grouped desktop size.",
+            "type": "boolean"
+          }
         }
       ],
       "result": {
@@ -2504,7 +3100,7 @@
       }
     },
     {
-      "description": "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min for them to send or clear it); keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
+      "description": "Paste text and press Enter, once nobody has typed for ~3 s and no draft a person typed is left unsent (it waits up to 2 min, counted from when it arrives, for them to send or clear it; a draft backspaced away is no draft, and one nobody typed on for 10 min, or whose viewer detached 1 min ago with none left, expires; terminal.get shows it as `draft`); keys a person presses meanwhile are held, then delivered. A send still waiting when its caller goes away (its `hc` was killed, its connection hung up) is dropped: nothing is typed. A client that only stops writing, as `hc connect` does when its stdin ends, still gets its answer. Refuses a blocked program unless `force`. A program that follows its inbox (terminal.inbox) gets the text queued there instead: nothing is typed.",
       "errors": [
         {
           "code": -32000,
@@ -3052,7 +3648,7 @@
       }
     },
     {
-      "description": "Press named keys, encoded for the program's current keyboard modes. Same quiet rule as send.",
+      "description": "Press named keys, encoded for the program's current keyboard modes. Same quiet rule as send, and the same drop if its caller goes away while it waits.",
       "errors": [
         {
           "code": -32000,

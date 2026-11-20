@@ -26,7 +26,14 @@ fallbacks, and overrides. `hc connect` speaks the same protocol over
 stdin/stdout, so `ssh box hc connect` is a remote core.
 
 A connection starts in **plain mode**: JSON-RPC 2.0, one message per line.
-Any language or `socat` works.
+Any language or `socat` works. Keep the connection open until the answer
+arrives: a `terminal.send`, `terminal.queue`, `terminal.keys` or
+`terminal.interrupt` still waiting for a person (or its turn) when its
+connection hangs up (the client closed it or was killed) is dropped and types
+nothing, and so is one on a framed connection that ends. A client that only
+shuts down its write side (`hc connect` does at the end of its stdin) still
+reads its answer, and what it pipelined behind the call is kept. Not noticed
+on Windows. `machine.exec` ends when its client closes or stops writing.
 
 ```
 → {"jsonrpc":"2.0","id":1,"method":"terminal.list","params":{}}
@@ -56,6 +63,7 @@ most 16 MiB.
 | 4 | FOCUS | viewer → core: 1 gained focus, 0 lost it |
 | 5 | FACTS | viewer → core: JSON display facts (`Display` in the schema) |
 | 6 | AUTOMATIC_INPUT | viewer → core: terminal-generated reply bytes, not human activity |
+| 7 | VISIBILITY | viewer → core: 1 visible on an active workspace, 0 hidden/off-workspace |
 
 Channel 0 carries JSON-RPC both ways. Calls on it run side by side.
 
@@ -99,10 +107,57 @@ serialized only when the observer has credit. The attach reply precedes stream
 frames, including on core-to-core relays and reconnects.
 Without this opt-in, existing event-driven observers keep their previous output
 behavior: no additional resize paints or RESIZE frames.
+A viewer with `resize_notifications` may also pass `resize_history: N`
+(default 0) when the core advertises `resize_history` in `hello.features`.
+Each paint after a RESIZE then carries the last N scrollback rows (main screen
+only), and right after the paint's screen reset (`CAN`, then the reset that
+ends `ESC[H ESC[2J`) it sends `ESC[3J`, so the viewer's history is replaced by
+the core's rather than added to. On the alternate screen the paint carries no
+history and no `ESC[3J`. N = 0 is the screen-only paint above, byte for byte.
+It needs `resize_notifications`. The attach reply confirms `resize_history: N`
+only when every core on the path has the feature (relays strip it before an
+older hop, and an older owner never echoes it); 0 or absent means screen-only
+paints, so keep the client's own fallback. N is at most 100000 (larger
+values count as 100000). History is replaced only whole: when the paint
+with all N rows (or every row the core has) would be over 2 MiB, it is the
+screen-only paint without `ESC[3J` instead, and the viewer keeps its own
+history. On the wire the order is fixed, however the frames split it: CAN,
+the reset ending `ESC[H ESC[2J`, `ESC[3J`, history, then the screen. Paints
+(first paints too) are never dropped for size, and only output queued
+behind a paint counts toward the backlog limit. If part of a history
+replacement went out and the rest was dropped (output overflowed the
+backlog), the viewer gets one complete replacement again, whatever its
+size, once it has credit; on the alternate screen that waits until the
+program is back on the main screen. A stream resumed after a dropped line
+(`resumed`) with `resize_history` owes a complete replacement too, since a
+replacement may have been cut with the line: it starts with one (on the
+alternate screen, once the program is back on the main screen), and keeps
+owing it until one is out whole.
+
+Desktop viewers may request `visibility_updates: true` on `terminal.attach`.
+The optional `visible` value means the view is compositor-visible on an active
+workspace/window; it defaults to true for existing callers. The attach reply
+confirms `visibility_updates: true` only when every core on the path can relay
+VISIBILITY frames. Send kind 7 when compositor visibility changes, independently
+of focus and idle activity. If support is false or absent, do not send kind 7;
+the viewer remains eligible as with older cores. Grouped sizing includes only
+visible eligible viewers, while a visible idle viewer continues to constrain
+both axes. A hidden resumed viewer does not block sizing; when shown, it remains
+pending until a positive physical RESIZE arrives. VISIBILITY stays ordered with
+DATA and RESIZE, including across relays.
 
 Flow control: a stream starts with 256 KiB of credit. The viewer sends
 CREDIT for the bytes it has written out. A viewer that falls more than
-4 MiB behind gets a fresh repaint instead of the backlog. A stalled stream
+4 MiB behind gets a fresh repaint instead of the backlog. `terminal.attach` may
+pass `credit` (bytes, at most the 256 KiB default) to start lower; cores
+with `attach_credit` in `hello.features` honor it. A relaying core uses it
+when it reattaches a viewer after a dropped line: the new stream there
+starts with only what the viewer can still take, so held credit is never
+granted twice, and CREDIT the viewer returns while that reattach is in
+flight is passed on to the new stream once it is connected. If a relay's backlog for a viewer still overflows (an older
+core there ignores `credit`), the relay closes that stream with
+`{"reason":"relay_overflow"}` rather than going on after a hole; attach
+again. A stalled stream
 never blocks channel 0 or other streams.
 
 A viewer detaches by sending CLOSE; the core answers with an empty CLOSE.

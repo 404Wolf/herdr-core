@@ -289,6 +289,97 @@ const DEFAULT_CELL: (u32, u32) = (10, 20);
 /// Ghostty's default theme, answered until a viewer tells us its own colors.
 const DEFAULT_FG: Rgb = [0xff, 0xff, 0xff];
 const DEFAULT_BG: Rgb = [0x28, 0x2c, 0x34];
+/// How every [`Terminal::paint`] starts: no hyperlink open (a viewer that
+/// missed a link's close must not carry it into the paint, nor into the live
+/// text after it; the screen's own active link is restored at the end), the
+/// viewer's main screen, cleared, cursor home. The link is closed on the
+/// screen the viewer was on, and again once the main screen is back, whose
+/// restored cursor can carry one of its own. A soft reset leaves mouse,
+/// focus, paste, sync and key modes alone: they are turned off too, so a
+/// viewer that missed their "off" (a dropped backlog) ends up with exactly
+/// the screen's own modes, replayed after it.
+pub const PAINT_RESET: &[u8] = b"\x1b]8;;\x1b\\\
+\x1b[!p\x1b[?2026l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\
+\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?1l\x1b[?66l\x1b[?2031l\x1b[?2048l\x1b[=0;1u\
+\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b]8;;\x1b\\\x1b[H\x1b[2J";
+
+/// The most bytes of OSC 8 hyperlink escapes one paint adds: as many as its
+/// other bytes (links at most double a paint), never fewer than
+/// `PAINT_LINKS_MIN` (a short screen keeps all its links) nor more than
+/// `PAINT_LINKS_MAX`. Unbounded, a link-dense history made a 77 KiB paint
+/// 4.7 MiB, and 51 such panes reached live output 20 s late in the app.
+const PAINT_LINKS_MIN: usize = 16 << 10;
+const PAINT_LINKS_MAX: usize = 128 << 10;
+const LINK_CLOSE: &[u8] = b"\x1b]8;;\x1b\\";
+
+fn paint_links_budget(other_bytes: usize) -> usize {
+    other_bytes.clamp(PAINT_LINKS_MIN, PAINT_LINKS_MAX)
+}
+
+/// Where the OSC 8 sequences in `paint` are, from `from` on, and whether each
+/// opens a link (has a target). The formatter ends them with ST, and no other
+/// byte of a paint is an ESC that could start one: cells hold no controls,
+/// and the title is an OSC of its own.
+fn osc8_spans(paint: &[u8], from: usize) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut spans = Vec::new();
+    let mut i = from;
+    while let Some(at) = paint[i..].windows(4).position(|w| w == b"\x1b]8;") {
+        let start = i + at;
+        let Some(len) = paint[start..].windows(2).position(|w| w == b"\x1b\\") else {
+            break;
+        };
+        let end = start + len + 2;
+        let body = &paint[start + 4..end - 2];
+        let opens = body.iter().position(|b| *b == b';').is_some_and(|semi| semi + 1 < body.len());
+        spans.push((start..end, opens));
+        i = end;
+    }
+    spans
+}
+
+/// `paint` with its hyperlinks within [`paint_links_budget`]: unchanged when
+/// they fit. Otherwise its newest links, the ones a viewer sees and taps
+/// (the screen's, then the cursor's active link), are kept while each fits
+/// whole, its open and close reserved together, counting back from the end;
+/// the text before the newest link that does not fit is written without
+/// links. The cursor's link is kept whenever any link is, so live text after
+/// the paint still continues it; otherwise the paint ends with no link open.
+/// Only OSC 8 sequences are left out, never another byte or part of one;
+/// closes with no link open (no-ops) go too, and the reset's closes are kept.
+/// Each row of a soft-wrapped link is its own open, so the cut can fall
+/// inside one: its first rows are then plain and its last rows linked.
+fn bound_paint_links(paint: Vec<u8>) -> Vec<u8> {
+    let spans = osc8_spans(&paint, PAINT_RESET.len());
+    let link_bytes: usize = spans.iter().map(|(span, _)| span.len()).sum();
+    let budget = paint_links_budget(paint.len() - link_bytes);
+    if link_bytes <= budget {
+        return paint;
+    }
+    // The oldest open kept: every open from it on fits, with its close.
+    let (mut first, mut left) = (spans.len(), budget);
+    for (i, (span, _)) in spans.iter().enumerate().rev().filter(|(_, (_, opens))| *opens) {
+        let Some(rest) = left.checked_sub(span.len() + LINK_CLOSE.len()) else {
+            break;
+        };
+        (first, left) = (i, rest);
+    }
+    let mut out = Vec::with_capacity(paint.len() - link_bytes + budget);
+    let (mut at, mut open) = (0, false);
+    for (i, (span, opens)) in spans.into_iter().enumerate() {
+        out.extend_from_slice(&paint[at..span.start]);
+        at = span.end;
+        if opens && i >= first {
+            out.extend_from_slice(&paint[span]);
+            open = true;
+        } else if open {
+            // A close, ending a kept link: reserved with its open.
+            out.extend_from_slice(LINK_CLOSE);
+            open = false;
+        }
+    }
+    out.extend_from_slice(&paint[at..]);
+    out
+}
 
 pub type Rgb = [u8; 3];
 
@@ -684,7 +775,8 @@ impl Terminal {
         (unsafe { ffi::ghostty_terminal_grid_ref(self.raw, point, &mut out) } == ffi::SUCCESS).then_some(out)
     }
 
-    fn history_rows(&self) -> u32 {
+    /// Scrollback rows above the screen.
+    pub fn history_rows(&self) -> u32 {
         let mut bar = ffi::Scrollbar::default();
         unsafe { ffi::ghostty_terminal_get(self.raw, ffi::DATA_SCROLLBAR, (&raw mut bar).cast()) };
         bar.total.saturating_sub(self.size().1 as u64) as u32
@@ -743,25 +835,39 @@ impl Terminal {
 
     /// Bytes that repaint this terminal on a fresh viewer: up to `history`
     /// scrollback lines (main screen only), then the cursor shape, then the
-    /// screen with its modes, cursor and title.
+    /// screen with its modes, cursor and title. For a viewer with this
+    /// terminal's rows; see [`Terminal::paint_for`].
     pub fn paint(&self, history: usize) -> Vec<u8> {
+        self.paint_for(history, self.size().1)
+    }
+
+    /// [`Terminal::paint`] for a viewer that renders `viewer_rows` rows, which
+    /// can differ from this terminal's (a viewer never told this size): the
+    /// history goes exactly into its scrollback, with no row lost or blank row
+    /// added. The screen is this terminal's still; one taller than the viewer
+    /// overflows it. Its hyperlinks are bounded (`bound_paint_links`).
+    pub fn paint_for(&self, history: usize, viewer_rows: u16) -> Vec<u8> {
+        bound_paint_links(self.paint_unbounded(history, viewer_rows))
+    }
+
+    /// [`Terminal::paint_for`] with all its hyperlinks.
+    fn paint_unbounded(&self, history: usize, viewer_rows: u16) -> Vec<u8> {
         let (cols, rows) = self.size();
         let last = (cols.saturating_sub(1), rows.saturating_sub(1) as u32);
-        // A soft reset leaves mouse, focus, paste, sync and key modes alone: turn
-        // them off too, so a viewer that missed their "off" (a dropped backlog)
-        // ends up with exactly the screen's own modes, replayed below.
-        let mut out = b"\x1b[!p\x1b[?2026l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\
-\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?1l\x1b[?66l\x1b[?2031l\x1b[?2048l\x1b[=0;1u\
-\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[H\x1b[2J"
-            .to_vec();
+        let mut out = PAINT_RESET.to_vec();
         let available = self.history_rows();
         if history > 0 && available > 0 && !self.alt_screen() {
-            let from = available.saturating_sub(history as u32);
+            // Saturating: a count past u32 must not wrap to "no history".
+            let from = available.saturating_sub(u32::try_from(history).unwrap_or(u32::MAX));
             if let Some(sel) = self.select(ffi::POINT_HISTORY, (0, from), (last.0, available - 1)) {
                 // Let the viewer wrap history itself so it can reflow on resize.
                 out.extend(self.format_with(ffi::FORMAT_VT, Some(&sel), false, true));
-                // Push those lines up into the viewer's scrollback before painting the screen.
-                out.extend(b"\x1b[0m\r\n".iter().chain(&b"\n".repeat(rows as usize)));
+                // Push those lines up into the viewer's scrollback before painting the screen:
+                // the CRLF leaves the last of them on a fresh row, and `viewer_rows - 1` more
+                // newlines take it off the viewer's top. One more would push a blank row into its
+                // scrollback too; one fewer would leave it on screen for the ED 2 to erase.
+                let advance = viewer_rows.max(1) - 1;
+                out.extend(b"\x1b[0m\r\n".iter().chain(&b"\n".repeat(advance as usize)));
                 out.extend(b"\x1b[H\x1b[2J");
             }
         }

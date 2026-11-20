@@ -2,6 +2,7 @@
 //! (a named pipe on Windows).
 
 use crate::api::{self, CoreInfo};
+use crate::input::Gone;
 use crate::paths::Paths;
 use crate::platform::{self, AsyncListener};
 use crate::rpc::{self, RpcError};
@@ -82,8 +83,8 @@ pub(crate) async fn finish(core: &Core) -> io::Result<()> {
     if core.restart.load(std::sync::atomic::Ordering::SeqCst) {
         core.handover().await?;
     }
-    if let Err(e) = core.flush_saved().await {
-        eprintln!("core: final registry flush failed: {}", e.message);
+    if let Some(why) = core.flush_warning().await {
+        crate::log!("core: final registry flush failed: {why}");
     }
     Ok(())
 }
@@ -113,7 +114,7 @@ fn load_identity(state: &Path, machine_id: Option<String>) -> io::Result<CoreInf
     let saved: Option<Identity> = crate::paths::read_state(&path)?;
     let info = match saved {
         Some(saved) if saved.machine_id.is_some() && machine_id.is_some() && saved.machine_id != machine_id => {
-            eprintln!("core: this disk came from another machine: a new identity, its terminals forgotten");
+            crate::log!("core: this disk came from another machine: a new identity, its terminals forgotten");
             // All gone before the new identity is written, or the next start tries again.
             for name in CLONE_FORGETS {
                 let p = state.join(name);
@@ -160,14 +161,30 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
         if line.trim().is_empty() {
             continue;
         }
-        let handling = handle(&core, None, Some(&plain), line.as_bytes());
-        // An exec ends when its caller goes away.
-        let handled = match is_exec(line.as_bytes()) {
-            true => tokio::select! {
+        let (ended, _) = tokio::sync::watch::channel(false);
+        let handling = handle(&core, None, Some(&plain), Gone::watch(&ended), line.as_bytes());
+        let handled = match method_of(line.as_bytes()).as_deref() {
+            // An exec ends when its caller goes away.
+            Some("machine.exec") => tokio::select! {
                 handled = handling => handled,
                 () = closed(&mut read, &mut ahead) => return Ok(()),
             },
-            false => handling.await,
+            // So does a send, keys or interrupt still waiting for a person: it types
+            // nothing (see `input::Gone`). Its client is gone when the connection is hung up,
+            // not when it stopped writing (a client may half-close and still read its answer),
+            // and nothing is read to find out: what the client pipelined behind the call
+            // (more requests, a hello and its frames) stays in `read` for the loop below.
+            Some("terminal.send" | "terminal.queue" | "terminal.keys" | "terminal.interrupt") => {
+                tokio::pin!(handling);
+                tokio::select! {
+                    handled = &mut handling => handled,
+                    () = platform::peer_gone(read.get_ref()) => {
+                        ended.send_replace(true);
+                        handling.await
+                    }
+                }
+            }
+            _ => handling.await,
         };
         let wrote = match &handled.reply {
             Some(reply) => write.write_all(format!("{reply}\n").as_bytes()).await,
@@ -187,6 +204,7 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
     }
     let mut conn = Conn::default();
     conn.local_desktop = local_desktop;
+    conn.peer_pid = platform::local_peer_pid(read.get_ref());
     let conn = Arc::new(conn);
     let mut writer = tokio::spawn(write_frames(core.clone(), conn.clone(), write));
     // Another core dialing in says who it is in its hello.
@@ -198,10 +216,11 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
         result = read_frames(&core, &conn, &mut read) => result,
         _ = &mut writer => Ok(()),
         () = conn.overflowed.notified() => {
-            eprintln!("core: a client stopped reading its replies: disconnected");
+            crate::log!("core: a client stopped reading its replies: disconnected");
             Ok(())
         }
     };
+    conn.end();
     core.detach(&conn, None);
     crate::remote::conn_gone(&core, &conn);
     crate::remote::peer_left(&core, &conn);
@@ -209,8 +228,8 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
     result
 }
 
-fn is_exec(message: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(message).is_ok_and(|m| m["method"] == "machine.exec")
+fn method_of(message: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(message).ok()?["method"].as_str().map(str::to_owned)
 }
 
 /// Returns once a plain connection is closed; what it sends meanwhile is
@@ -332,7 +351,7 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
                 }
                 let (core, conn) = (core.clone(), conn.clone());
                 let task = tokio::spawn(async move {
-                    let handled = handle(&core, Some(&conn), None, &payload).await;
+                    let handled = handle(&core, Some(&conn), None, conn.caller(), &payload).await;
                     if let Some(reply) = &handled.reply {
                         conn.with(|out| {
                             out.control(wire::encode(0, wire::DATA, reply.to_string().as_bytes()));
@@ -361,6 +380,12 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
             }
             (ch, wire::RESIZE) if payload.len() == 4 => {
                 core.viewer_resize(conn, ch, u16_at(&payload, 0), u16_at(&payload, 2))
+            }
+            (ch, wire::VISIBILITY) if payload.len() == 1 && payload[0] <= 1 => {
+                core.viewer_visibility(conn, ch, payload[0] == 1)
+            }
+            (ch, wire::WINDOW_FOCUS) if payload.len() == 1 && payload[0] <= 1 => {
+                core.viewer_window_focus(conn, ch, payload[0] == 1)
             }
             (ch, wire::FOCUS) => core.viewer_focus(conn, ch, payload.first() == Some(&1)),
             (ch, wire::FACTS) => {
@@ -407,6 +432,7 @@ async fn handle(
     core: &Arc<Core>,
     conn: Option<&Arc<Conn>>,
     plain: Option<&std::sync::Mutex<Option<api::PlainSub>>>,
+    gone: Gone,
     message: &[u8],
 ) -> Handled {
     let reply = |reply| Handled { reply: Some(reply), framed: false, stop: false };
@@ -418,7 +444,7 @@ async fn handle(
         let err = RpcError::invalid_request("missing method");
         return reply(rpc::response(request["id"].clone(), Err(err)));
     };
-    let call = api::Call { core, conn, plain };
+    let call = api::Call { core, conn, plain, gone };
     let params = crate::remote::from_peer(core, conn, request["params"].clone());
     let result = match crate::remote::route(core, method, &params) {
         _ if method == "$/orphaned" => crate::remote::orphaned(core, conn, &params).await,

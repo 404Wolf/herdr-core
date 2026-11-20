@@ -17,6 +17,7 @@ Terminals
   run <cmd|template> [task]   run it and wait like a shell (--bg: don't wait)
   ls                          list live terminals (--all: finished too)
   get <t>                     show one terminal
+  viewers <t>                 show attached viewers and local sizing decision
   attach [t]                  put this terminal on it (ctrl+\ detaches)
   read <t>                    print its screen and history
   kill <t>                    end its program
@@ -588,7 +589,7 @@ Commands:
   start    
   stop     
   status   
-  restart  Restart the core (e.g. after an update); programs keep running
+  restart  Restart the core (e.g. after an update); programs keep running. Refused while the core can't save its terminals (a full disk): the next core would kill every live terminal missing from the saved registry
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -599,13 +600,14 @@ Options:
 ## hc server restart
 
 ```text
-Restart the core (e.g. after an update); programs keep running
+Restart the core (e.g. after an update); programs keep running. Refused while the core can't save its terminals (a full disk): the next core would kill every live terminal missing from the saved registry
 
 Usage: hc server restart [OPTIONS]
 
 Options:
-      --json  JSON output even in a terminal
-  -h, --help  Print help
+      --force-stale-registry  Restart even though the core can't save its terminals. The next core then kills every live terminal missing from the registry saved on disk (it loads that one), and the answer says which. For a restart that can't wait, such as a disk that won't recover; otherwise free the disk
+      --json                  JSON output even in a terminal
+  -h, --help                  Print help
 ```
 
 ## hc server start
@@ -663,6 +665,21 @@ Options:
       --version <X.Y.Z>  At least this release (`0.1.4`): nothing changes when this hc is already that or newer
       --force            Allow an older version (saved state only moves forward), or a release of another protocol generation
   -h, --help             Print help
+```
+
+## hc viewers
+
+```text
+Show attached viewers and the local sizing decision for one terminal
+
+Usage: hc viewers [OPTIONS] <TERMINAL>
+
+Arguments:
+  <TERMINAL>  A local terminal: `t7` or its local name. This query never fans out to peers
+
+Options:
+      --json  JSON output even in a terminal
+  -h, --help  Print help
 ```
 
 ## hc wait

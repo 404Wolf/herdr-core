@@ -153,6 +153,10 @@ pub struct Terminal {
     /// ones were forgotten (see `inbox::forget_old_keys`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub keys_complete_since: u64,
+    /// `hc get` only: a person's unsent draft in it, which agents' text
+    /// waits for (see `hc viewers`); absent: none. Never saved.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<crate::input::DraftView>,
 }
 
 impl Terminal {
@@ -322,6 +326,7 @@ impl Registry {
                 last_message: 0,
                 queued_keys: Default::default(),
                 keys_complete_since: 0,
+                draft: None,
                 template: new.template.map(|t| t.name),
                 first_message: None,
                 holder: None,
@@ -468,8 +473,17 @@ impl JsonSchema for Public {
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         let mut schema = Terminal::json_schema(generator);
+        // `draft` is never saved, so never read back (`skip_deserializing`),
+        // which drops it from the derived schema; `terminal.get` returns it.
+        let mut draft = serde_json::Value::from(generator.subschema_for::<Option<crate::input::DraftView>>());
+        if let Some(draft) = draft.as_object_mut() {
+            let about = "`terminal.get` only: a person's unsent draft in it, which agents' text waits for \
+                         (see `terminal.viewers`); absent: none. Never saved.";
+            draft.insert("description".into(), about.into());
+        }
         if let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) {
             PRIVATE.iter().for_each(|k| drop(props.remove(*k)));
+            props.insert("draft".into(), draft);
         }
         if let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut()) {
             required.retain(|k| !k.as_str().is_some_and(|k| PRIVATE.contains(&k)));

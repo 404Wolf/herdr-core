@@ -107,7 +107,9 @@ pub struct HelloParams {
     pub core: Option<CoreInfo>,
     /// What that core calls this one (`rohan`), so news about `t7` reaches it as `rohan/t7`.
     pub calls_you: Option<String>,
-    /// Features supported by a core dialing in, including relaying size notifications.
+    /// Immutable build identity; older cores may omit it.
+    pub build: Option<String>,
+    /// Features supported by a core dialing in, including relaying size and viewer visibility updates.
     #[serde(default)]
     pub features: Vec<String>,
 }
@@ -116,6 +118,7 @@ pub struct HelloParams {
 pub struct HelloResult {
     pub generation: u32,
     pub version: String,
+    pub build: String,
     pub core: CoreInfo,
     pub framed: bool,
     pub methods: Vec<String>,
@@ -155,6 +158,19 @@ pub struct StatusResult {
     /// How long a terminal remembers a `terminal.queue` key: a sender may
     /// retry a send whose answer it lost for up to this long.
     pub queue_keys_kept_ms: u64,
+    /// Present while the core can't save its terminals (a full disk, say). It
+    /// keeps trying and says so here once, instead of failing calls; what
+    /// changed meanwhile is lost if the core stops before it saves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saving: Option<SavingFailure>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct SavingFailure {
+    /// When saving started to fail, ms since the epoch.
+    pub since_ms: u64,
+    /// Why the newest try failed.
+    pub reason: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -190,6 +206,20 @@ pub struct DocSetResult {
 #[derive(Serialize, JsonSchema)]
 pub struct StopResult {
     pub stopped: bool,
+    /// A restart with `force_stale_registry`: the terminals the next core will kill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct RestartParams {
+    /// Restart even though the core can't save its terminals. The next core
+    /// then kills every live terminal missing from the registry saved on disk
+    /// (it loads that one), and the answer says which. For a restart that
+    /// can't wait, such as a disk that won't recover; otherwise free the disk.
+    #[arg(long)]
+    #[serde(default)]
+    pub force_stale_registry: bool,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -303,6 +333,12 @@ pub struct TerminalParams {
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct ViewerListParams {
+    /// A local terminal: `t7` or its local name. This query never fans out to peers.
+    pub terminal: String,
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ListParams {
     /// Include finished terminals.
     #[arg(long)]
@@ -388,14 +424,48 @@ pub struct AttachParams {
     #[arg(long)]
     #[serde(default)]
     pub observe: bool,
-    /// Observer understands core-to-viewer RESIZE before replacement paints.
+    /// Viewer understands core-to-viewer RESIZE before replacement paints.
     #[arg(skip)]
     #[serde(default)]
     pub resize_notifications: bool,
+    /// The view is visible on an active workspace and may constrain grouped desktop size.
+    #[arg(skip)]
+    #[serde(default = "visible_by_default")]
+    pub visible: bool,
+    /// The client understands the viewer-to-core VISIBILITY frame.
+    #[arg(skip)]
+    #[serde(default)]
+    pub visibility_updates: bool,
+    /// The client sends WINDOW_FOCUS frames: only the focused window sizes the grid.
+    #[arg(skip)]
+    #[serde(default)]
+    pub focus_updates: bool,
+    /// With `focus_updates`: the window showing this view has keyboard focus now.
+    #[arg(skip)]
+    #[serde(default)]
+    pub focused: bool,
+    /// Milliseconds since the view was last used (a person's input or, with
+    /// `focus_updates`, focus there), for an attach nobody caused just now (a
+    /// reconnect, a reattach), focused or not. Without `focus_updates` it
+    /// dates the view's last real input. At or above a year
+    /// (31536000000; send i64::MAX for "never"): never used, no focus
+    /// history. Absent: a `focused` attach is itself the use; an unfocused
+    /// one has not been used.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_ms: Option<u64>,
     /// Scrollback lines to show first (main screen only).
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
     pub history: usize,
+    /// With `resize_notifications`: scrollback lines each repaint after a RESIZE
+    /// carries (main screen only), after `ESC[3J` so they replace the viewer's
+    /// history. 0: the repaint is the screen only. At most 100000 (more counts
+    /// as 100000). If the whole of it would be over 2 MiB, that repaint is the
+    /// screen only, without `ESC[3J`.
+    #[arg(skip)]
+    #[serde(default)]
+    pub resize_history: usize,
     /// The viewer's size in cells.
     #[arg(skip)]
     pub cols: u16,
@@ -409,6 +479,12 @@ pub struct AttachParams {
     #[arg(skip)]
     #[serde(default)]
     pub resumed: bool,
+    /// The stream's starting credit in bytes, at most the usual 256 KiB
+    /// window (the default). A relay reattaching a viewer passes what that
+    /// viewer can still take, so bytes it already holds for it count.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<u32>,
     /// Desktop identity forwarded by a core line; ignored from ordinary clients.
     #[arg(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -426,10 +502,28 @@ pub struct AttachResult {
     pub channel: u32,
     pub terminal: Public,
     /// True only when the entire path sends RESIZE before replacement paints.
-    /// False or absent means the observer must track size changes separately.
+    /// False or absent means the viewer must track size changes separately.
     pub resize_notifications: bool,
+    /// True only when every core on the path accepts viewer visibility updates.
+    pub visibility_updates: bool,
+    /// True only when every core on the path accepts WINDOW_FOCUS (kind 8).
+    pub focus_updates: bool,
+    /// The `resize_history` the owner applies, 0 unless every core on the
+    /// path has the `resize_history` feature (and `resize_notifications`
+    /// holds). Absent: 0.
+    #[serde(default)]
+    pub resize_history: usize,
     /// The entire attach path accepts AUTOMATIC_INPUT (kind 6). Absent means use DATA.
     pub automatic_input: bool,
+    /// With `focus_updates`: the owner sizes by use (`focus_by_use`): the
+    /// viewer used last leads, so WINDOW_FOCUS(1) on each use (a touch, a
+    /// resume) matters. Absent: false (older owner: focused desktop first).
+    #[serde(default)]
+    pub focus_by_use: bool,
+}
+
+fn visible_by_default() -> bool {
+    true
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -558,6 +652,10 @@ pub struct SendResult {
     /// `terminal.queue`: its key was queued before, so it wasn't queued again.
     #[serde(default, skip_serializing_if = "is_false")]
     pub repeated: bool,
+    /// The core could not save its terminals just now (a full disk, say) and
+    /// keeps trying; this call itself went through, so don't repeat it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -655,6 +753,10 @@ pub struct KeysParams {
 pub struct KeysResult {
     pub status: Option<String>,
     pub turn: u64,
+    /// The core could not save its terminals just now (a full disk, say) and
+    /// keeps trying; this call itself went through, so don't repeat it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
@@ -674,6 +776,10 @@ pub struct InterruptResult {
     pub outcome: String,
     /// The key sent: esc for programs that report status, else ctrl+c.
     pub key: String,
+    /// The core could not save its terminals just now (a full disk, say) and
+    /// keeps trying; this call itself went through, so don't repeat it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]

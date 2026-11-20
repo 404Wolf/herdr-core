@@ -65,6 +65,12 @@ pub fn build_id() -> String {
         .clone()
 }
 
+/// Human-readable, immutable identity for peer compatibility diagnostics.
+pub fn peer_build() -> String {
+    option_env!("HERDR_CORE_BUILD").map(str::to_owned)
+        .unwrap_or_else(|| format!("{}/{}", env!("CARGO_PKG_VERSION"), build_id()))
+}
+
 fn unavailable(message: String) -> RpcError {
     RpcError::new("unavailable", message, "check the core log in the state directory")
 }

@@ -2,6 +2,7 @@
 //! Channel 0 carries JSON-RPC messages; attach streams get their own channels.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub const HEADER: usize = 9;
@@ -21,6 +22,11 @@ pub const FOCUS: u8 = 4;
 pub const FACTS: u8 = 5;
 /// Viewer → core: terminal-generated replies, not human activity.
 pub const AUTOMATIC_INPUT: u8 = 6;
+/// Viewer → core: 1 visible on an active workspace, 0 hidden/off-workspace.
+pub const VISIBILITY: u8 = 7;
+/// Viewer → core, negotiated (`focus_updates`): 1 = the window showing this
+/// view has keyboard focus, 0 = it does not. Sizing only; FOCUS stays program focus.
+pub const WINDOW_FOCUS: u8 = 8;
 
 /// Credit a stream starts with before the viewer acknowledges anything.
 pub const WINDOW: usize = 256 * 1024;
@@ -114,8 +120,11 @@ impl<R: AsyncRead + Unpin> AsyncRead for Watched<'_, R> {
 }
 
 /// A framed connection as the rest of the core sees it: queue frames, wake the writer.
-#[derive(Default)]
 pub struct Conn {
+    /// Monotonic identity for diagnostics; stable for this connection's lifetime.
+    pub(crate) id: u64,
+    /// Kernel-authenticated same-uid Unix peer. Never reported for peer-core lines.
+    pub(crate) peer_pid: Option<u32>,
     /// A verified local desktop app (possibly through its `hc connect` child).
     pub(crate) local_desktop: bool,
     outbox: std::sync::Mutex<Outbox>,
@@ -123,11 +132,48 @@ pub struct Conn {
     /// It fell too far behind (`MAX_CONTROL`): the connection must end.
     pub overflowed: tokio::sync::Notify,
     next_channel: std::sync::atomic::AtomicU32,
+    /// Told when the connection ends (see `end`).
+    ended: Ended,
+}
+
+struct Ended(tokio::sync::watch::Sender<bool>);
+
+impl Default for Ended {
+    fn default() -> Self {
+        Ended(tokio::sync::watch::channel(false).0)
+    }
+}
+
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
+impl Default for Conn {
+    fn default() -> Self {
+        Self {
+            id: NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed),
+            peer_pid: None,
+            local_desktop: false,
+            outbox: std::sync::Mutex::new(Outbox::default()),
+            wake: tokio::sync::Notify::new(),
+            overflowed: tokio::sync::Notify::new(),
+            next_channel: std::sync::atomic::AtomicU32::new(0),
+            ended: Ended::default(),
+        }
+    }
 }
 
 impl Conn {
     pub fn outbox(&self) -> std::sync::MutexGuard<'_, Outbox> {
         self.outbox.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Whether the other end of this connection is still there, for the calls it makes.
+    pub fn caller(&self) -> crate::input::Gone {
+        crate::input::Gone::watch(&self.ended.0)
+    }
+
+    /// The connection ended: calls still waiting on a person for it give up.
+    pub fn end(&self) {
+        self.ended.0.send_replace(true);
     }
 
     pub fn new_channel(&self) -> u32 {
@@ -153,6 +199,37 @@ struct Stream {
     credit: usize,
     /// The program ended: CLOSE (with this reason) once `pending` is out.
     ending: Option<Vec<u8>>,
+    /// The authoritative paint at the front of `pending`: its length, and
+    /// how much of it is still unsent.
+    paint_len: usize,
+    paint_left: usize,
+    /// That paint clears the viewer's history (ESC[3J) before replacing it.
+    paint_clears: bool,
+    /// A history-clearing paint was cut short after it started going out:
+    /// the viewer may have lost its history, so its next paint must carry
+    /// all of it. Cleared once such a paint is out whole.
+    history_lost: bool,
+}
+
+impl Stream {
+    /// Unsent bytes are about to go: note a history-clearing paint cut short.
+    fn drop_pending(&mut self) {
+        if self.paint_clears && self.paint_left > 0 && self.paint_left < self.paint_len {
+            self.history_lost = true;
+        }
+        self.pending.clear();
+        self.paint_len = 0;
+        self.paint_left = 0;
+        self.paint_clears = false;
+    }
+
+    fn start_paint(&mut self, bytes: &[u8], clears_history: bool) {
+        self.drop_pending();
+        self.pending.extend(bytes);
+        self.paint_len = bytes.len();
+        self.paint_left = bytes.len();
+        self.paint_clears = clears_history;
+    }
 }
 
 /// What one connection still has to send. Control frames always go first;
@@ -184,7 +261,17 @@ impl Outbox {
     pub fn open(&mut self, channel: u32) {
         self.streams.insert(
             channel,
-            Stream { pending: VecDeque::new(), resizes: VecDeque::new(), paused: false, credit: WINDOW, ending: None },
+            Stream {
+                pending: VecDeque::new(),
+                resizes: VecDeque::new(),
+                paused: false,
+                credit: WINDOW,
+                ending: None,
+                paint_len: 0,
+                paint_left: 0,
+                paint_clears: false,
+                history_lost: false,
+            },
         );
     }
 
@@ -200,6 +287,18 @@ impl Outbox {
         }
     }
 
+    /// A starting credit below the usual window (a relay's reattach).
+    pub fn set_credit(&mut self, channel: u32, credit: usize) {
+        if let Some(s) = self.streams.get_mut(&channel) {
+            s.credit = credit.min(WINDOW);
+        }
+    }
+
+    /// What the viewer will still take beyond what is queued for it.
+    pub fn room(&self, channel: u32) -> usize {
+        self.streams.get(&channel).map_or(0, |s| s.credit.saturating_sub(s.pending.len()))
+    }
+
     pub fn can_send(&self, channel: u32) -> bool {
         self.streams.get(&channel).is_some_and(|s| !s.paused && s.credit > 0)
     }
@@ -208,7 +307,7 @@ impl Outbox {
     /// A partly delivered escape sequence is cancelled by the repaint's CAN.
     pub fn resize(&mut self, channel: u32, size: &[u8]) {
         if let Some(s) = self.streams.get_mut(&channel) {
-            s.pending.clear();
+            s.drop_pending();
             s.resizes.clear();
             s.resizes.push_back((0, size.to_vec()));
         }
@@ -224,10 +323,47 @@ impl Outbox {
     /// Replace obsolete bytes with a self-contained paint, without a RESIZE
     /// frame: legacy desktop clients keep their own pane geometry.
     pub fn repaint(&mut self, channel: u32, bytes: &[u8]) {
+        self.repaint_clearing(channel, bytes, false);
+    }
+
+    /// `repaint` for a paint that may clear the viewer's history first.
+    pub fn repaint_clearing(&mut self, channel: u32, bytes: &[u8], clears_history: bool) {
         if let Some(s) = self.streams.get_mut(&channel) {
-            s.pending.clear();
-            s.pending.extend(bytes);
+            s.start_paint(bytes, clears_history);
         }
+    }
+
+    /// Queues an authoritative paint in place of unsent output, after any
+    /// RESIZE already queued. Never refused: a paint is one snapshot, not a
+    /// backlog, so `MAX_PENDING` does not apply to it (output after it does).
+    pub fn paint(&mut self, channel: u32, bytes: &[u8], clears_history: bool) {
+        if let Some(s) = self.streams.get_mut(&channel) {
+            let latest = s.resizes.pop_back();
+            s.resizes.clear();
+            if let Some((_, size)) = latest {
+                s.resizes.push_back((0, size));
+            }
+            s.start_paint(bytes, clears_history);
+        }
+    }
+
+    /// A history-clearing paint to this viewer was cut short: its next paint
+    /// must carry the whole history again.
+    pub fn history_lost(&self, channel: u32) -> bool {
+        self.streams.get(&channel).is_some_and(|s| s.history_lost)
+    }
+
+    /// The viewer's history may be gone (a stream resumed after a dropped
+    /// line): owed a whole clearing paint until one is out whole.
+    pub fn mark_history_lost(&mut self, channel: u32) {
+        if let Some(s) = self.streams.get_mut(&channel) {
+            s.history_lost = true;
+        }
+    }
+
+    /// History was lost and no clearing paint is on its way to repair it.
+    pub fn repair_owed(&self, channel: u32) -> bool {
+        self.streams.get(&channel).is_some_and(|s| s.history_lost && !(s.paint_clears && s.paint_left > 0))
     }
 
     /// Ends a stream now (the viewer detached): whatever is queued is dropped.
@@ -246,11 +382,12 @@ impl Outbox {
     }
 
     /// Queues stream output. Returns false (and drops the backlog) when the
-    /// viewer is too far behind: the caller replaces it with a repaint.
+    /// viewer is too far behind: the caller replaces it with a repaint. Only
+    /// output counts: an unsent paint at the front is not backlog.
     pub fn data(&mut self, channel: u32, bytes: &[u8]) -> bool {
         let Some(s) = self.streams.get_mut(&channel) else { return true };
-        if s.pending.len() + bytes.len() > MAX_PENDING {
-            s.pending.clear();
+        if s.pending.len() - s.paint_left + bytes.len() > MAX_PENDING {
+            s.drop_pending();
             let latest = s.resizes.pop_back();
             s.resizes.clear();
             if let Some((_, size)) = latest {
@@ -316,6 +453,12 @@ impl Outbox {
             *at -= n;
         }
         s.credit -= n;
+        if s.paint_left > 0 {
+            s.paint_left -= n.min(s.paint_left);
+            if s.paint_left == 0 && s.paint_clears {
+                s.history_lost = false;
+            }
+        }
         let chunk: Vec<u8> = s.pending.drain(..n).collect();
         Some(encode(channel, DATA, &chunk))
     }
@@ -324,6 +467,34 @@ impl Outbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paints_are_never_refused_and_a_cut_history_paint_is_remembered_until_one_is_out_whole() {
+        let mut out = Outbox::default();
+        out.open(1);
+        out.credit(1, 64 << 20);
+        let big = vec![b'p'; MAX_PENDING + 1];
+        out.resize(1, &[80, 0, 24, 0]);
+        out.paint(1, &big, false);
+        assert_eq!(out.queued(1), big.len(), "a paint over MAX_PENDING is queued, not dropped");
+        while out.next_frame().is_some() {}
+        // A clearing paint cut short after its first bytes went out...
+        out.paint(1, &vec![b'h'; 3 * CHUNK], true);
+        out.next_frame().unwrap();
+        out.resize(1, &[81, 0, 24, 0]);
+        assert!(out.history_lost(1));
+        // ...stays remembered through screen-only paints, until a clearing one is out whole.
+        out.paint(1, b"screen", false);
+        while out.next_frame().is_some() {}
+        assert!(out.history_lost(1));
+        out.paint(1, &vec![b'h'; 3 * CHUNK], true);
+        while out.next_frame().is_some() {}
+        assert!(!out.history_lost(1));
+        // Cut before any byte went out: nothing reached the viewer, nothing lost.
+        out.paint(1, b"clearing", true);
+        out.resize(1, &[82, 0, 24, 0]);
+        assert!(!out.history_lost(1));
+    }
 
     #[test]
     fn resize_replaces_stalled_and_partially_sent_paints_atomically() {
@@ -479,5 +650,77 @@ mod tests {
 
         // Too far behind: the backlog is dropped so the caller can repaint.
         assert!(!out.data(1, &vec![b'b'; MAX_PENDING]));
+    }
+}
+// The #88 v3 reviewer's outbox probes, kept as regression tests.
+
+#[cfg(test)]
+mod reviewer_v3_wire {
+    use super::*;
+    #[test]
+    fn reviewer_v3_paint_queues_stay_bounded_across_viewers_and_resizes() {
+        let mut out = Outbox::default();
+        let paint = vec![b'p'; MAX_PENDING + 1024];
+        for ch in 1..=6 {
+            out.open(ch);
+        }
+        for round in 0..100 {
+            for ch in 1..=6 {
+                out.resize(ch, &[80 + (round % 20) as u8, 0, 24, 0]);
+                out.paint(ch, &paint, round % 2 == 0);
+                assert_eq!(out.queued(ch), paint.len());
+                assert_eq!(out.streams[&ch].resizes.len(), 1);
+                assert!(out.streams[&ch].pending.capacity() <= 2 * paint.len());
+            }
+            assert_eq!(out.streams.values().map(|s| s.pending.len()).sum::<usize>(), 6 * paint.len());
+        }
+        eprintln!(
+            "6 viewers x 100 large resizes: queued={} capacity={}",
+            out.streams.values().map(|s| s.pending.len()).sum::<usize>(),
+            out.streams.values().map(|s| s.pending.capacity()).sum::<usize>()
+        );
+    }
+    #[test]
+    fn reviewer_v3_max_pending_should_bound_output_behind_whole_paint() {
+        let mut out = Outbox::default();
+        out.open(1);
+        let paint = vec![b'p'; MAX_PENDING + 1];
+        out.paint(1, &paint, false);
+        assert!(
+            out.data(1, b"live"),
+            "MAX_PENDING includes the whole paint instead of only bounding live output behind it"
+        );
+        assert_eq!(out.queued(1), paint.len() + 4);
+    }
+}
+
+#[cfg(test)]
+mod reviewer_v3_repair_loop {
+    use super::*;
+    #[test]
+    fn reviewer_v3_one_loss_must_not_restart_oversized_repair_on_every_tiny_write() {
+        let mut out = Outbox::default();
+        out.open(1);
+        out.paint(1, &vec![b'h'; 3 * CHUNK], true);
+        out.next_frame().unwrap();
+        out.resize(1, &[80, 0, 24, 0]);
+        assert!(out.history_lost(1));
+        let repair = vec![b'r'; MAX_PENDING + 1];
+        let mut copies = 1;
+        out.paint(1, &repair, true);
+        for _ in 0..5 {
+            // One and the same loss; no repair byte goes out between writes.
+            if !out.data(1, b"\x1b[0m") {
+                out.paint(1, &repair, true);
+                copies += 1;
+            }
+        }
+        eprintln!(
+            "one history loss, zero repair bytes sent, five 4-byte writes: {copies} full repair copies queued successively"
+        );
+        assert!(
+            copies <= 1,
+            "count the live backlog separately: a whole pending repair must not be repeatedly discarded and reserialized by tiny writes"
+        );
     }
 }
