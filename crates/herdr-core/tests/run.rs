@@ -109,3 +109,80 @@ fn a_program_that_says_it_stopped_working_returns_and_a_slow_one_keeps_running()
         "{full}"
     );
 }
+
+#[test]
+fn runs_inherit_only_the_effective_local_parents_space_unless_explicit_or_unparented() {
+    use serde_json::json;
+    let s = Session::new();
+    let parent = s.json(&["run", "--bg", "--label", "herdr.space=project", "--label", "role=pm", "sleep", "100"]);
+    let caller = parent["address"].as_str().unwrap();
+    let plain = run(&s, &["sleep", "100"]);
+    s.json(&["run", "--bg", "--name", "selected", "--label", "herdr.space=selected", "sleep", "100"]);
+    let mut conn = s.connect();
+    for (i, extra, expected) in [
+        (1, json!({}), json!({"herdr.space": "project"})),
+        (
+            2,
+            json!({"labels": {"herdr.space": "other", "role": "worker"}}),
+            json!({"herdr.space": "other", "role": "worker"}),
+        ),
+        (3, json!({"no_parent": true}), json!({})),
+        (4, json!({"caller": "t99999"}), json!({})),
+        (5, json!({"caller": null}), json!({})),
+        (6, json!({"parent": plain}), json!({})),
+        (7, json!({"outlive_parent": true}), json!({"herdr.space": "project"})),
+        (8, json!({"parent": "selected"}), json!({"herdr.space": "selected"})),
+        (9, json!({"caller": "remote/t1"}), json!({})),
+        (10, json!({"labels": {"herdr.space": ""}}), json!({})),
+    ] {
+        let mut params = json!({"argv": ["sleep", "100"], "caller": caller});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let reply = conn.call(i, "terminal.run", params);
+        assert_eq!(reply["result"]["labels"], expected, "{reply}");
+    }
+    let identity = s.json(&["server", "status"]);
+    for on in [vec![], vec!["--on", identity["core"]["id"].as_str().unwrap()]] {
+        let out = s
+            .cmd()
+            .env("HC_TERMINAL_ID", caller)
+            .args(["--json", "run", "--bg"])
+            .args(&on)
+            .args(["sleep", "100"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let child: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(get(&s, child["address"].as_str().unwrap())["labels"], json!({"herdr.space": "project"}));
+    }
+    let reply = conn.call(11, "terminal.run", json!({"argv": ["sleep", "100"], "caller": plain}));
+    assert_eq!(reply["result"]["labels"], json!({}));
+}
+
+#[test]
+fn remote_runs_inherit_only_an_explicit_destination_parents_space() {
+    use serde_json::json;
+    let remote = Session::new();
+    let mut s = Session::new();
+    s.env.push(fake_ssh(&s, &[("remote", &remote)]));
+    let parent = s.json(&["run", "--bg", "--label", "herdr.space=source", "sleep", "100"]);
+    let destination = remote.json(&["run", "--bg", "--label", "herdr.space=destination", "sleep", "100"]);
+    s.json(&["machine", "add", "remote"]);
+    for (flags, expected) in [
+        (vec![], json!({})),
+        (vec!["--label", "herdr.space=explicit"], json!({"herdr.space": "explicit"})),
+        (vec!["--parent", destination["address"].as_str().unwrap()], json!({"herdr.space": "destination"})),
+        (vec!["--no-parent"], json!({})),
+    ] {
+        let out = s
+            .cmd()
+            .env("HC_TERMINAL_ID", parent["address"].as_str().unwrap())
+            .args(["--json", "run", "--bg", "--on", "remote"])
+            .args(&flags)
+            .args(["sleep", "100"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let child: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(get(&s, child["address"].as_str().unwrap())["labels"], expected);
+    }
+}

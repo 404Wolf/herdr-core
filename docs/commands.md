@@ -529,7 +529,7 @@ Options:
       --name <NAME>        Name, unique among live terminals: 1-32 of a-z 0-9 - _ 
       --cwd <CWD>          Working directory (default: where hc runs; through the API, the core's; with --on, that machine's home)
       --on <MACHINE>       Run it on another machine (see `hc machine ls`); its address is `machine/t7`
-      --label <K=V>        Labels, key=value (repeatable)
+      --label <K=V>        Labels, key=value (repeatable). Inherits only herdr.space from the effective local parent unless explicitly set; never across cores
       --parent <PARENT>    Parent terminal (default: the terminal it is started from)
       --no-parent          No parent, even when started from a terminal
       --no-notify          Don't type notes about it into its parent

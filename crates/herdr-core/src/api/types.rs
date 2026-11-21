@@ -241,7 +241,8 @@ pub struct RunParams {
     #[arg(skip)]
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// Labels, key=value (repeatable).
+    /// Labels, key=value (repeatable). Inherits only herdr.space from the
+    /// effective local parent unless explicitly set; never across cores.
     #[arg(long = "label", value_name = "K=V")]
     #[serde(default, with = "label_map")]
     #[schemars(with = "BTreeMap<String, String>")]
